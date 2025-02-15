@@ -1,0 +1,8 @@
+langchain==0.1.8
+langchain-openai==0.0.8
+openai>=1.10.0
+python-dotenv==1.0.0
+pydantic==2.5.2
+tqdm==4.66.1
+pytest==8.3.4
+faiss-cpu>=1.7.4 

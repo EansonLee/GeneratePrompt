@@ -1,0 +1,50 @@
+# Python virtual environment
+langchain_env/
+venv/
+env/
+.env
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Project specific
+data/vector_store/
+*.log
+.env.*
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Security sensitive files
+**/run_tests.bat
+**/run_tests.ps1
+**/setup.ps1
+**/test_openai.py
+*.key
+secrets.json
+config.local.*
+.env*
+credentials.* 
