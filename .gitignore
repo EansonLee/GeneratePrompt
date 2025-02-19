@@ -1,35 +1,66 @@
-# Python virtual environment
-langchain_env/
-venv/
-env/
-.env
-
-# Python cache files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.env
+.venv
+langchain_env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 项目特定
+data/
+*.log
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+
+# 向量数据库
+vector_store/
+*.faiss
+*.pkl
+
+# 测试
 .pytest_cache/
 .coverage
 htmlcov/
 
-# IDE settings
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-
-# Project specific
-data/vector_store/
-*.log
-.env.*
+# 其他
+*.bak
+*.tmp
+.DS_Store
 
 # System files
-.DS_Store
 Thumbs.db
 
 # Temporary files
