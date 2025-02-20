@@ -5,8 +5,8 @@ from typing import Dict, Any, Optional
 from src.prompt_optimizer import PromptOptimizer
 from src.template_generator import TemplateGenerator
 from config.config import LOG_LEVEL
-from utils.vector_store import VectorStore
-from agents.prompt_optimization_agent import PromptOptimizationAgent
+from src.utils.vector_store import VectorStore
+from src.agents.prompt_optimization_agent import PromptOptimizationAgent
 
 # 配置日志
 logging.basicConfig(

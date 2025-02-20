@@ -1,3 +1,5 @@
+"""配置文件"""
+
 import os
 from dotenv import load_dotenv
 from pathlib import Path
@@ -13,9 +15,8 @@ VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", str(DATA_DIR / "vector_store"))
 
 # OpenAI配置
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("请在.env文件中设置OPENAI_API_KEY环境变量")
-OPENAI_MODEL = "gpt-4-turbo-preview"
+OPENAI_MODEL = "gpt-3.5-turbo"
+DEFAULT_MODEL_NAME = OPENAI_MODEL
 
 # 应用配置
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
@@ -86,8 +87,8 @@ AGENT_CONFIG = {
 }
 
 # 提示优化特定配置
-PROMPT_OPTIMIZATION_TEMPERATURE = 0.5  # 平衡创造性和一致性
-PROMPT_OPTIMIZATION_MAX_TOKENS = 4000  # 增加token限制以支持更详细的输出
+PROMPT_OPTIMIZATION_TEMPERATURE = 0.7
+PROMPT_OPTIMIZATION_MAX_TOKENS = 1000
 
 # 向量搜索配置
 SEARCH_CONFIG = {
@@ -107,7 +108,6 @@ REACT_AGENT_CONFIG = {
 }
 
 # 模型配置
-DEFAULT_MODEL_NAME = OPENAI_MODEL
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 2000
 REACT_AGENT_TEMPERATURE = 0.7
@@ -115,29 +115,26 @@ REACT_AGENT_MAX_TOKENS = 4000
 
 # 模板生成配置
 TEMPLATE_GENERATION_CONFIG = {
-    "temperature": 0.7,  # 控制创造性
-    "max_tokens": 4000,  # 生成的模板最大长度
-    "max_contexts": 5,   # 最大上下文数量
-    "max_templates": 3   # 最大历史模板数量
+    "max_contexts": 5,  # 最大上下文数量
+    "max_templates": 3,  # 最大模板数量
+    "temperature": 0.7,  # 温度
+    "max_tokens": 2000,  # 最大token数
 }
 
 # 模板生成系统提示词
-TEMPLATE_SYSTEM_PROMPT = """你是一个专业的prompt工程师，擅长生成高质量的prompt模板。
+TEMPLATE_SYSTEM_PROMPT = """你是一个专业的模板生成助手。
+请根据提供的上下文信息和历史模板，生成一个新的模板。
+模板应该包含以下信息：
+1. 项目基本信息（名称、描述、架构等）
+2. 技术栈信息（前端框架、后端框架、数据库、API等）
+3. 页面信息（页面列表、路由设计、组件结构等）
+"""
 
-你的任务是基于提供的上下文信息和历史模板，生成一个新的、更好的prompt模板。
-
-在生成模板时，你需要：
-1. 分析上下文信息，理解用户的需求和场景
-2. 参考历史模板的优点，避免其缺点
-3. 确保模板结构清晰，易于理解
-4. 包含必要的技术细节和要求
-5. 考虑性能和可维护性
-6. 使模板具有通用性，适应不同场景
-7. 添加适当的示例和说明
-
-请记住：
-- 模板应该是可复用的
-- 避免过于具体或过于抽象
-- 使用清晰的分类和层次结构
-- 包含必要的参数和选项
-- 提供充分的上下文信息""" 
+PROMPT_OPTIMIZATION_SYSTEM_PROMPT = """你是一个专业的prompt优化助手。
+请根据提供的上下文信息和模板，优化用户的prompt。
+优化后的prompt应该：
+1. 包含完整的页面信息
+2. 明确技术要求
+3. 描述交互细节
+4. 考虑性能和用户体验
+""" 

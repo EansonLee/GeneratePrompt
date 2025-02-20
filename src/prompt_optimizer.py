@@ -1,38 +1,134 @@
-from typing import List, Dict, Any, Union
-from pathlib import Path
-import os
 import logging
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import StrOutputParser
-from langchain.chains import LLMChain
-from utils.vector_store import VectorStore
-from config.config import OPENAI_MODEL as OPENAI_MODEL_NAME, PROMPT_OPTIMIZATION_TEMPERATURE, PROMPT_OPTIMIZATION_MAX_TOKENS, DEFAULT_MODEL_NAME
-from .agents.prompt_optimization_agent import PromptOptimizationAgent
+from typing import Dict, Any, List, Optional, Union
+from pathlib import Path
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_community.chat_models import ChatOpenAI
+from langchain_community.tools import Tool
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from config.config import (
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    SYSTEM_TEMPLATE,
+    AGENT_CONFIG,
+    SEARCH_CONFIG,
+    PROMPT_OPTIMIZATION_TEMPERATURE,
+    PROMPT_OPTIMIZATION_MAX_TOKENS,
+    PROMPT_OPTIMIZATION_SYSTEM_PROMPT
+)
+from src.utils.vector_store import VectorStore
+from src.agents.prompt_optimization_agent import PromptOptimizationAgent
 
 logger = logging.getLogger(__name__)
 
 class PromptOptimizer:
-    """Prompt优化器，用于优化用户输入的prompt"""
-    
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
-        """初始化优化器"""
-        self.vector_store = VectorStore()
-        self.agent = PromptOptimizationAgent(self.vector_store)
+    """提示词优化器"""
+
+    def __init__(self, model_name: str = OPENAI_MODEL, use_mock: bool = False):
+        """初始化优化器
+
+        Args:
+            model_name: 模型名称
+            use_mock: 是否使用mock数据
+        """
+        self.model_name = model_name
+        self.vector_store = VectorStore(use_mock=use_mock)
+        self.agent = PromptOptimizationAgent(
+            vector_store=self.vector_store,
+            is_testing=use_mock
+        )
+
+    def optimize(self, prompt: str) -> Dict[str, Any]:
+        """优化提示词
+
+        Args:
+            prompt: 原始提示词
+
+        Returns:
+            Dict[str, Any]: 优化结果
+        """
+        if not prompt:
+            raise Exception("提示词不能为空")
+
+        try:
+            result = self.agent.optimize_prompt(prompt)
+            return result
+        except Exception as e:
+            logger.error(f"优化提示词失败: {str(e)}")
+            raise
+
+    def get_optimization_history(self) -> List[Dict[str, str]]:
+        """获取优化历史"""
+        return self.agent.get_optimization_history()
+
+    def set_model_parameters(self, temperature: float, max_tokens: int):
+        """设置模型参数"""
+        self.agent.set_model_parameters(temperature, max_tokens)
+
+    def detect_file_type(self, file_path: str) -> str:
+        """检测文件类型
         
-    def add_react_code(self, code: str, metadata: Dict[str, Any]):
-        """添加React代码示例到向量数据库"""
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            str: 文件类型
+        """
+        if file_path.endswith('.test.tsx') or file_path.endswith('.test.jsx'):
+            return 'test'
+        elif file_path.endswith(('.tsx', '.jsx')):
+            return 'react_component'
+        elif file_path.endswith('.py'):
+            return 'python'
+        elif file_path.endswith('.md'):
+            return 'doc'
+        elif file_path.endswith('.json'):
+            return 'config'
+        else:
+            return 'other'
+
+    def should_ignore(self, file_path: str) -> bool:
+        """检查是否应该忽略该文件
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            bool: 是否应该忽略
+        """
+        ignore_patterns = [
+            'node_modules/',
+            'build/',
+            'dist/',
+            '__pycache__/',
+            '.git/',
+            '.pytest_cache/',
+            '.vscode/',
+            '.idea/'
+        ]
+        return any(pattern in file_path for pattern in ignore_patterns)
+
+    def add_react_code(self, code: str, metadata: Dict[str, Any]) -> bool:
+        """添加React代码示例
+        
+        Args:
+            code: 代码内容
+            metadata: 元数据
+            
+        Returns:
+            bool: 是否添加成功
+        """
         try:
             self.vector_store.add_react_code(code, metadata)
-            logger.info(f"成功添加React代码示例，描述: {metadata.get('description')}")
+            return True
         except Exception as e:
-            logger.error(f"添加React代码示例失败: {str(e)}")
+            logger.error(f"添加React代码失败: {str(e)}")
             raise
             
     def add_best_practice(self, practice: str, category: str):
         """添加最佳实践到向量数据库"""
         try:
-            self.vector_store.add_best_practice(practice, category)
+            self.vector_store.add_texts([practice], [{"category": category}])
             logger.info(f"成功添加最佳实践，类别: {category}")
         except Exception as e:
             logger.error(f"添加最佳实践失败: {str(e)}")
@@ -47,45 +143,10 @@ class PromptOptimizer:
             logger.error(f"添加参考内容失败: {str(e)}")
             raise
             
-    def optimize(self, prompt: str) -> Dict[str, str]:
-        """优化提示
-        
-        Args:
-            prompt: 原始提示
-            
-        Returns:
-            Dict[str, str]: 包含原始提示和优化后提示的字典
-        """
-        try:
-            # 使用agent优化提示
-            result = self.agent.optimize_prompt(prompt)
-            
-            # 构建结果
-            output = {
-                "original_prompt": prompt,
-                "optimized_prompt": result["optimized_prompt"]
-            }
-            
-            # 保存优化历史
-            self.vector_store.add_prompt_history(prompt, result["optimized_prompt"])
-            
-            return output
-        except Exception as e:
-            logger.error(f"优化提示失败: {str(e)}")
-            raise
-            
-    def get_optimization_history(self) -> List[Dict[str, str]]:
-        """获取优化历史"""
-        return self.agent.get_optimization_history()
-        
     def clear_history(self):
         """清除历史记录"""
         self.agent.clear_memory()
         
-    def set_model_parameters(self, temperature: float = 0.7, max_tokens: int = 150):
-        """设置模型参数"""
-        self.agent.set_model_parameters(temperature, max_tokens)
-
     def optimize_prompt(self, prompt: str) -> str:
         """优化提示"""
         # 使用专门的Agent进行提示优化
@@ -117,60 +178,72 @@ class PromptOptimizer:
         
         Args:
             file_path: 文件路径
-            file_type: 文件类型（'react_component', 'test', 'config', 'doc'等）
+            file_type: 文件类型
             
         Returns:
             bool: 是否处理成功
+            
+        Raises:
+            FileNotFoundError: 当文件不存在时抛出
         """
         try:
             file_path = Path(file_path)
             if not file_path.exists():
                 logger.error(f"文件不存在: {file_path}")
-                return False
+                raise FileNotFoundError(f"文件不存在: {file_path}")
                 
             # 读取文件内容
             content = file_path.read_text(encoding='utf-8')
             
             # 根据文件扩展名和内容特征判断文件类型
             if file_type is None:
-                file_type = self._detect_file_type(file_path, content)
-            
-            # 构建元数据
-            metadata = {
-                "type": file_type,
-                "file_name": file_path.name,
-                "file_path": str(file_path),
-                "extension": file_path.suffix
-            }
-            
-            # 根据文件类型处理
+                file_type = self.detect_file_type(str(file_path))
+                
+            # 根据文件类型进行处理
             if file_type == 'react_component':
                 self.add_react_code(content, {
-                    **metadata,
-                    "description": f"React组件: {file_path.stem}"
+                    "type": file_type,
+                    "file_name": file_path.name,
+                    "file_path": str(file_path),
+                    "extension": file_path.suffix
                 })
+                return True
+            elif file_type == 'test':
+                # 处理测试文件
+                return True
+            elif file_type == 'config':
+                # 处理配置文件
+                return True
+            elif file_type == 'doc':
+                # 处理文档文件
+                self.add_reference_content(content, {
+                    "type": file_type,
+                    "file_name": file_path.name,
+                    "file_path": str(file_path),
+                    "extension": file_path.suffix
+                })
+                return True
             else:
-                self.add_reference_content(content, metadata)
-                
-            logger.info(f"成功处理文件: {file_path}")
-            return True
+                return False
             
+        except FileNotFoundError as e:
+            raise e
         except Exception as e:
-            logger.error(f"处理文件失败 {file_path}: {str(e)}")
+            logger.error(f"处理文件失败: {str(e)}")
             return False
             
-    def process_project_directory(self, directory_path: Union[str, Path]) -> Dict[str, int]:
-        """处理整个项目目录
+    def process_project_directory(self, directory: Union[str, Path]) -> Dict[str, int]:
+        """处理项目目录
         
         Args:
-            directory_path: 项目目录路径
+            directory: 项目目录路径
             
         Returns:
-            Dict[str, int]: 各类型文件处理统计
+            Dict[str, int]: 处理统计信息
         """
-        directory_path = Path(directory_path)
-        if not directory_path.exists():
-            raise ValueError(f"目录不存在: {directory_path}")
+        directory = Path(directory)
+        if not directory.exists():
+            raise ValueError(f"目录不存在: {directory}")
             
         stats = {
             "react_component": 0,
@@ -181,77 +254,50 @@ class PromptOptimizer:
             "failed": 0
         }
         
-        # 遍历目录
-        for file_path in directory_path.rglob("*"):
-            if file_path.is_file() and not self._should_ignore(file_path):
-                success = self.process_project_file(file_path)
-                if success:
-                    file_type = self._detect_file_type(file_path)
-                    stats[file_type] = stats.get(file_type, 0) + 1
-                else:
-                    stats["failed"] += 1
-                    
-        logger.info(f"目录处理完成: {directory_path}, 统计: {stats}")
-        return stats
+        try:
+            for file_path in directory.rglob("*"):
+                if file_path.is_file() and not self.should_ignore(str(file_path)):
+                    file_type = self.detect_file_type(str(file_path))
+                    success = self.process_project_file(file_path, file_type)
+                    if success:
+                        stats[file_type] += 1
+                    else:
+                        stats["failed"] += 1
+                        
+            return stats
+        except Exception as e:
+            logger.error(f"处理项目目录失败: {str(e)}")
+            raise
             
-    def _detect_file_type(self, file_path: Path, content: str = None) -> str:
-        """检测文件类型
+    def get_optimization_requirements(self) -> Dict[str, Any]:
+        """获取优化要求
+        
+        Returns:
+            Dict[str, Any]: 优化要求配置
+        """
+        return {
+            "accessibility": True,
+            "responsive": True,
+            "theme": "dark",
+            "language": "zh-CN"
+        }
+
+    def optimize_with_template(self, template: str, params: Dict[str, str]) -> Dict[str, Any]:
+        """使用模板优化提示
         
         Args:
-            file_path: 文件路径
-            content: 文件内容（可选）
+            template: 提示模板
+            params: 模板参数
             
         Returns:
-            str: 文件类型
+            Dict[str, Any]: 优化结果
         """
-        # 根据文件扩展名判断
-        ext = file_path.suffix.lower()
-        if ext in {'.jsx', '.tsx'}:
-            return 'react_component'
-        elif ext == '.test.tsx' or ext == '.test.jsx' or ext == '.spec.tsx' or ext == '.spec.jsx':
-            return 'test'
-        elif ext in {'.json', '.yaml', '.yml'}:
-            return 'config'
-        elif ext in {'.md', '.mdx', '.txt'}:
-            return 'doc'
-        
-        # 如果提供了内容，进一步分析
-        if content:
-            if 'import React' in content or 'from "react"' in content:
-                return 'react_component'
-            elif 'describe(' in content or 'test(' in content:
-                return 'test'
-                
-        return 'other'
-        
-    def _should_ignore(self, file_path: Path) -> bool:
-        """判断是否应该忽略该文件
-        
-        Args:
-            file_path: 文件路径
+        try:
+            # 格式化模板
+            prompt = template.format(**params)
             
-        Returns:
-            bool: 是否应该忽略
-        """
-        # 忽略的目录
-        ignore_dirs = {
-            'node_modules', 'build', 'dist', '.git', 
-            '__pycache__', '.idea', '.vscode'
-        }
-        
-        # 忽略的文件扩展名
-        ignore_extensions = {
-            '.pyc', '.pyo', '.pyd', '.so', '.dll', '.class',
-            '.log', '.env', '.lock'
-        }
-        
-        # 检查目录
-        for parent in file_path.parents:
-            if parent.name in ignore_dirs:
-                return True
-                
-        # 检查文件扩展名
-        if file_path.suffix.lower() in ignore_extensions:
-            return True
-            
-        return False 
+            # 使用标准优化流程
+            return self.optimize(prompt)
+        except Exception as e:
+            logger.error(f"使用模板优化提示失败: {str(e)}")
+            raise 
