@@ -13,6 +13,12 @@ setup(
         "openai>=1.14.2",
         "chromadb>=0.4.22",
         "faiss-cpu>=1.7.4",
-        "python-dotenv>=1.0.1"
+        "python-dotenv>=1.0.1",
+        "fastapi>=0.109.2",
+        "uvicorn>=0.27.1",
+        "python-multipart>=0.0.9",
+        "py7zr>=0.20.8",
+        "patool>=2.0.0",
+        "unrar>=0.4"
     ],
 ) 

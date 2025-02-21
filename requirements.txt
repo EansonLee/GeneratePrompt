@@ -27,3 +27,15 @@ mypy>=1.9.0
 black>=24.2.0
 isort>=5.13.2
 flake8>=7.0.0
+
+# 文件处理相关依赖
+python-multipart>=0.0.9
+py7zr>=0.20.8
+patool>=2.0.0
+unrar>=0.4
+
+# 文本处理相关依赖
+langchain-text-splitters>=0.0.1
+unstructured>=0.10.30
+markdown>=3.5.2
+PyYAML>=6.0.1

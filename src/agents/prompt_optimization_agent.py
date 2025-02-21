@@ -7,6 +7,7 @@ from src.utils.vector_store import VectorStore
 from config.config import (
     OPENAI_API_KEY,
     OPENAI_MODEL,
+    OPENAI_BASE_URL,
     SYSTEM_TEMPLATE,
     AGENT_CONFIG,
     SEARCH_CONFIG,
@@ -100,7 +101,9 @@ class PromptOptimizationAgent:
         else:
             self.llm = ChatOpenAI(
                 temperature=0.7,
-                model_name="gpt-3.5-turbo"
+                model_name=OPENAI_MODEL,
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL
             )
 
         # 创建工具列表

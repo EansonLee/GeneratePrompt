@@ -8,6 +8,7 @@ from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_core.documents import Document
 from config.config import OPENAI_API_KEY, VECTOR_STORE_CONFIG
 import numpy as np
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,15 @@ class VectorStore:
             use_mock: 是否使用mock数据
         """
         self.is_testing = os.getenv("TESTING", "False").lower() == "true"
+        
+        # 初始化文本分割器
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=VECTOR_STORE_CONFIG["CHUNK_SIZE"],
+            chunk_overlap=VECTOR_STORE_CONFIG["CHUNK_OVERLAP"],
+            length_function=len,
+            separators=VECTOR_STORE_CONFIG["SEPARATORS"]
+        )
+        logger.info("文本分割器初始化完成")
         
         if use_mock or self.is_testing:
             # 创建mock embeddings
@@ -43,7 +53,9 @@ class VectorStore:
                 Document(page_content="测试模板2")
             ]
             self.templates_store = mock_templates
+            logger.info("Mock数据初始化完成")
         else:
+            logger.info("初始化向量数据库...")
             self.embeddings = OpenAIEmbeddings()
             self.contexts_store = FAISS.from_texts(
                 ["示例上下文"],
@@ -55,6 +67,7 @@ class VectorStore:
                 self.embeddings,
                 metadatas=[{"type": "template"}]
             )
+            logger.info("向量数据库初始化完成")
             
         self.prompt_history = []
     
@@ -257,17 +270,37 @@ class VectorStore:
             logger.error(f"搜索模板失败: {str(e)}")
             raise Exception(f"搜索模板失败: {str(e)}")
         
-    def add_texts(self, texts: List[str], metadatas: List[Dict[str, Any]]):
-        """添加文本到向量存储
+    def add_texts(self, texts: List[str], metadatas: List[Dict[str, Any]] = None) -> List[str]:
+        """添加文本到向量数据库
         
         Args:
-            texts: 文本列表
-            metadatas: 元数据列表
+            texts: 要添加的文本列表
+            metadatas: 文本对应的元数据列表
+            
+        Returns:
+            List[str]: 添加的文档ID列表
         """
         try:
-            self.contexts_store.add_texts(texts, metadatas=metadatas)
+            logger.info(f"开始添加{len(texts)}条文本到向量数据库")
+            for i, (text, metadata) in enumerate(zip(texts, metadatas or [{}] * len(texts))):
+                logger.debug(f"处理第{i+1}条文本: {text[:100]}...")
+                logger.debug(f"元数据: {metadata}")
+                
+            documents = self.text_splitter.create_documents(texts, metadatas=metadatas)
+            logger.info(f"文本分块完成，共{len(documents)}个块")
+            
+            self.contexts_store.add_documents(documents)
+            logger.info("文档已添加到向量数据库")
+            
+            # 验证插入
+            verification_results = [self.verify_insertion(text) for text in texts]
+            if not all(verification_results):
+                logger.warning("部分文本可能未成功插入")
+            
+            return ["doc_" + str(i) for i in range(len(texts))]
+            
         except Exception as e:
-            logger.error(f"添加文本失败: {str(e)}")
+            logger.error(f"添加文本到向量数据库失败: {str(e)}")
             raise
         
     def get_prompt_history(self) -> List[Dict[str, str]]:
@@ -326,3 +359,58 @@ class VectorStore:
         except Exception as e:
             logger.error(f"添加模板失败: {str(e)}")
             raise 
+
+    def verify_insertion(self, content: str, store_type: str = "contexts") -> bool:
+        """验证内容是否成功插入到向量数据库
+        
+        Args:
+            content: 要验证的内容
+            store_type: 存储类型，可选 "contexts" 或 "templates"
+            
+        Returns:
+            bool: 是否成功插入
+        """
+        try:
+            store = self.contexts_store if store_type == "contexts" else self.templates_store
+            results = store.similarity_search(content[:100], k=1)  # 使用内容前100个字符进行搜索
+            
+            if not results:
+                logger.warning(f"未找到插入的内容: {content[:100]}...")
+                return False
+                
+            similarity_score = self.calculate_similarity(content, results[0].page_content)
+            is_similar = similarity_score > 0.9  # 设置相似度阈值
+            
+            if not is_similar:
+                logger.warning(f"找到的内容相似度较低 ({similarity_score}): {results[0].page_content[:100]}...")
+            else:
+                logger.info(f"成功验证内容插入 (相似度: {similarity_score})")
+                
+            return is_similar
+            
+        except Exception as e:
+            logger.error(f"验证插入失败: {str(e)}")
+            return False
+            
+    def calculate_similarity(self, text1: str, text2: str) -> float:
+        """计算两段文本的相似度
+        
+        Args:
+            text1: 第一段文本
+            text2: 第二段文本
+            
+        Returns:
+            float: 相似度分数 (0-1)
+        """
+        try:
+            # 使用 OpenAI embeddings 计算相似度
+            embedding1 = self.embeddings.embed_query(text1)
+            embedding2 = self.embeddings.embed_query(text2)
+            
+            # 计算余弦相似度
+            similarity = np.dot(embedding1, embedding2) / (np.linalg.norm(embedding1) * np.linalg.norm(embedding2))
+            return float(similarity)
+            
+        except Exception as e:
+            logger.error(f"计算相似度失败: {str(e)}")
+            return 0.0 

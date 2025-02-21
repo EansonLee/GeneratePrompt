@@ -14,8 +14,9 @@ DATA_DIR = BASE_DIR / "data"
 VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", str(DATA_DIR / "vector_store"))
 
 # OpenAI配置
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = "gpt-3.5-turbo"
+OPENAI_API_KEY = "sk-FastAPITi1j0BFd0pIv5oonN0pozt1mDi0SRz5E3mKCje0DE"
+OPENAI_BASE_URL = "https://api.free.fastapi.ai/v1"
+OPENAI_MODEL = "free-gpt-4o"
 DEFAULT_MODEL_NAME = OPENAI_MODEL
 
 # 应用配置
@@ -31,7 +32,10 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 VECTOR_STORE_CONFIG = {
     "collection_name": "prompt_optimization",
     "distance_strategy": "cosine",
-    "persist_directory": VECTOR_DB_PATH
+    "persist_directory": VECTOR_DB_PATH,
+    "CHUNK_SIZE": 1000,
+    "CHUNK_OVERLAP": 200,
+    "SEPARATORS": ["\n\n", "\n", "。", "，", " ", ""]
 }
 
 # 提示模板配置
@@ -122,13 +126,77 @@ TEMPLATE_GENERATION_CONFIG = {
 }
 
 # 模板生成系统提示词
-TEMPLATE_SYSTEM_PROMPT = """你是一个专业的模板生成助手。
-请根据提供的上下文信息和历史模板，生成一个新的模板。
-模板应该包含以下信息：
-1. 项目基本信息（名称、描述、架构等）
-2. 技术栈信息（前端框架、后端框架、数据库、API等）
-3. 页面信息（页面列表、路由设计、组件结构等）
-"""
+TEMPLATE_SYSTEM_PROMPT = """你是一个专业的模板生成助手。请根据提供的上下文信息和历史模板，生成一个新的、完整的项目模板。
+
+模板必须包含以下所有部分（缺一不可）：
+
+## 前端技术
+- 必须指定前端框架（如React、Vue等）
+- UI组件库选择
+- 构建工具
+- 开发语言（如TypeScript）
+
+## 后端技术
+- 后端框架选择
+- 编程语言版本
+- ORM或数据访问层
+- API框架
+
+## 数据库技术
+- 主数据库选择
+- 缓存解决方案
+- 数据备份策略
+
+## API设计
+- API风格（REST/GraphQL）
+- 认证方案
+- 接口文档工具
+- 错误处理策略
+
+## 导航设计
+- 导航栏类型
+- 菜单结构
+- 路由设计
+- 面包屑导航
+
+## 响应式设计
+- 断点设计
+- 布局系统
+- 适配策略
+- 媒体查询方案
+
+## 用户交互流程
+- 用户认证流程
+- 主要功能流程
+- 错误处理流程
+- 反馈机制
+
+## 状态管理方案
+- 状态管理库选择
+- 数据流转方案
+- 缓存策略
+- 持久化方案
+
+## 数据流设计
+- 数据流向图
+- 组件通信方式
+- 数据更新策略
+- 数据同步机制
+
+## 组件设计
+- 组件划分策略
+- 组件复用方案
+- 样式解决方案
+- 主题设计
+
+生成模板时，请确保：
+1. 所有必要部分都已包含
+2. 每个部分都有具体的技术选型和实现方案
+3. 技术选型之间要保持一致性
+4. 考虑项目的实际需求和规模
+5. 遵循最佳实践和行业标准
+
+如果上下文信息不足，请使用合理的默认值，但必须确保生成的模板包含所有必要部分。"""
 
 PROMPT_OPTIMIZATION_SYSTEM_PROMPT = """你是一个专业的prompt优化助手。
 请根据提供的上下文信息和模板，优化用户的prompt。

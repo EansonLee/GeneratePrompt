@@ -2,13 +2,21 @@ from typing import Dict, Any, List
 from abc import ABC, abstractmethod
 from langchain.schema import BaseMessage
 from langchain_openai import ChatOpenAI
-from config.config import DEFAULT_MODEL_NAME
+from config.config import (
+    DEFAULT_MODEL_NAME,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL
+)
 
 class BaseAgent(ABC):
     """基础Agent类"""
     
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
-        self.llm = ChatOpenAI(model_name=model_name)
+        self.llm = ChatOpenAI(
+            model_name=model_name,
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL
+        )
         self.memory: List[BaseMessage] = []
         
     @abstractmethod

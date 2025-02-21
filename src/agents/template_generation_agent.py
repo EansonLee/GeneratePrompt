@@ -1,9 +1,14 @@
 import logging
 from typing import List, Dict, Any
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableSequence
-from config.config import TEMPLATE_SYSTEM_PROMPT
+from config.config import (
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OPENAI_BASE_URL,
+    TEMPLATE_SYSTEM_PROMPT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +18,10 @@ class TemplateGenerationAgent:
     def __init__(self):
         """初始化Agent"""
         self.llm = ChatOpenAI(
-            model_name="gpt-3.5-turbo",
-            temperature=0.7
+            model_name=OPENAI_MODEL,
+            temperature=0.7,
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL
         )
         
         # 初始化提示模板

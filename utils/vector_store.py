@@ -3,7 +3,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from config.config import EMBEDDING_MODEL, CHUNK_SIZE, CHUNK_OVERLAP, OPENAI_API_KEY
+from config.config import (
+    EMBEDDING_MODEL,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL
+)
 import logging
 import os
 
@@ -19,7 +25,8 @@ class VectorStore:
         
         self.embeddings = OpenAIEmbeddings(
             model=EMBEDDING_MODEL,
-            openai_api_key=OPENAI_API_KEY  # 显式传递 API Key
+            openai_api_key=OPENAI_API_KEY,  # 显式传递 API Key
+            base_url=OPENAI_BASE_URL  # 添加代理URL
         )
         self.vector_store = FAISS.from_documents(
             [Document(page_content="初始化文档", metadata={})],
