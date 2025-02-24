@@ -51,16 +51,31 @@ class TemplateGenerator:
         "组件设计"
     ]
 
-    def __init__(self, model_name: str = OPENAI_MODEL):
+    def __init__(
+            self,
+            model_name: str = OPENAI_MODEL,
+            max_contexts: int = TEMPLATE_GENERATION_CONFIG["max_contexts"],
+            max_templates: int = TEMPLATE_GENERATION_CONFIG["max_templates"],
+            temperature: float = TEMPLATE_GENERATION_CONFIG["temperature"],
+            max_tokens: int = TEMPLATE_GENERATION_CONFIG["max_tokens"]
+        ):
         """初始化生成器
         
         Args:
             model_name: 模型名称
+            max_contexts: 最大上下文数量
+            max_templates: 最大模板数量
+            temperature: 温度参数
+            max_tokens: 最大token数
         """
         try:
+            self.max_contexts = max_contexts
+            self.max_templates = max_templates
+            
             self.llm = ChatOpenAI(
                 model_name=model_name,
-                temperature=0.7,
+                temperature=temperature,
+                max_tokens=max_tokens,
                 api_key=OPENAI_API_KEY,
                 base_url=OPENAI_BASE_URL
             )
@@ -82,10 +97,10 @@ class TemplateGenerator:
         """
         try:
             contexts = self.vector_store.search_contexts(
-                limit=TEMPLATE_GENERATION_CONFIG.get('max_contexts', 3)
+                limit=self.max_contexts
             )
             templates = self.vector_store.search_templates(
-                limit=TEMPLATE_GENERATION_CONFIG.get('max_templates', 2)
+                limit=self.max_templates
             )
             
             if not contexts or not templates:

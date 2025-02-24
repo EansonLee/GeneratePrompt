@@ -4,13 +4,26 @@ import os
 from datetime import datetime
 from unittest.mock import Mock, MagicMock
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
-from config.config import OPENAI_API_KEY, VECTOR_STORE_CONFIG
+from config.config import (
+    OPENAI_API_KEY, 
+    OPENAI_BASE_URL, 
+    EMBEDDING_MODEL,
+    VECTOR_STORE_CONFIG,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    LOG_LEVEL,
+    DEBUG
+)
 import numpy as np
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+import requests
+import json
 
+# 设置日志级别
 logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 class VectorStore:
     """向量数据库管理类"""
@@ -23,53 +36,69 @@ class VectorStore:
         """
         self.is_testing = os.getenv("TESTING", "False").lower() == "true"
         
+        # 打印配置信息
+        logger.info("==================== 当前配置信息 ====================")
+        logger.info(f"配置文件中的 API Key: {OPENAI_API_KEY}")
+        logger.info(f"配置文件中的 Base URL: {OPENAI_BASE_URL}")
+        logger.info(f"配置文件中的 Embedding Model: {EMBEDDING_MODEL}")
+        logger.info(f"调试模式: {DEBUG}")
+        logger.info("====================================================")
+        
         # 初始化文本分割器
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=VECTOR_STORE_CONFIG["CHUNK_SIZE"],
-            chunk_overlap=VECTOR_STORE_CONFIG["CHUNK_OVERLAP"],
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
             length_function=len,
             separators=VECTOR_STORE_CONFIG["SEPARATORS"]
         )
         logger.info("文本分割器初始化完成")
         
+        # 根据配置初始化存储
         if use_mock or self.is_testing:
-            # 创建mock embeddings
-            mock_embeddings = MagicMock()
-            mock_embeddings.embed_documents.return_value = [[0.1] * 1536, [0.2] * 1536]
-            mock_embeddings.embed_query.return_value = [0.1] * 1536
-            self.embeddings = mock_embeddings
-            
-            # 创建mock stores
-            mock_contexts = MagicMock()
-            mock_contexts.similarity_search.return_value = [
-                Document(page_content="测试上下文1"),
-                Document(page_content="测试上下文2")
-            ]
-            self.contexts_store = mock_contexts
-            
-            mock_templates = MagicMock()
-            mock_templates.similarity_search.return_value = [
-                Document(page_content="测试模板1"),
-                Document(page_content="测试模板2")
-            ]
-            self.templates_store = mock_templates
-            logger.info("Mock数据初始化完成")
+            self._init_mock_data()
         else:
-            logger.info("初始化向量数据库...")
-            self.embeddings = OpenAIEmbeddings()
-            self.contexts_store = FAISS.from_texts(
-                ["示例上下文"],
-                self.embeddings,
-                metadatas=[{"type": "context"}]
-            )
-            self.templates_store = FAISS.from_texts(
-                ["示例模板"],
-                self.embeddings,
-                metadatas=[{"type": "template"}]
-            )
-            logger.info("向量数据库初始化完成")
-            
+            try:
+                self._init_real_api()
+            except Exception as e:
+                logger.error(f"真实API初始化失败，切换到mock模式: {str(e)}")
+                if DEBUG:
+                    logger.debug("详细错误信息:", exc_info=True)
+                self._init_mock_data()
+        
         self.prompt_history = []
+    
+    def _init_real_api(self):
+        """初始化真实API"""
+        try:
+            logger.info("初始化向量数据库...")
+            self.embeddings = OpenAIEmbeddings(
+                model=EMBEDDING_MODEL,
+                openai_api_key=OPENAI_API_KEY,
+                openai_api_base=OPENAI_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "OpenAI/v1 PythonClient/1.0.0"
+                },
+                timeout=30,
+                max_retries=3,
+                model_kwargs={
+                    "encoding_format": "float"
+                }
+            )
+            
+            # 测试嵌入功能
+            self._test_embeddings()
+            
+            # 初始化存储
+            self._init_stores()
+            
+        except Exception as e:
+            logger.error(f"向量数据库初始化失败: {str(e)}")
+            if DEBUG:
+                logger.debug(f"详细错误信息: {str(e)}", exc_info=True)
+            raise
     
     def add_react_code(self, code: str, metadata: Dict[str, Any]) -> None:
         """添加React代码
@@ -414,3 +443,54 @@ class VectorStore:
         except Exception as e:
             logger.error(f"计算相似度失败: {str(e)}")
             return 0.0 
+
+    def _test_embeddings(self):
+        """测试嵌入功能"""
+        logger.info("测试嵌入功能...")
+        test_text = "测试文本"
+        test_embedding = self.embeddings.embed_query(test_text)
+        logger.info(f"嵌入测试成功，向量维度: {len(test_embedding)}")
+        
+    def _init_stores(self):
+        """初始化存储"""
+        logger.info("初始化向量存储...")
+        self.contexts_store = FAISS.from_texts(
+            ["示例上下文"],
+            self.embeddings,
+            metadatas=[{
+                "type": "context",
+                "timestamp": datetime.now().isoformat()
+            }]
+        )
+        self.templates_store = FAISS.from_texts(
+            ["示例模板"],
+            self.embeddings,
+            metadatas=[{
+                "type": "template",
+                "timestamp": datetime.now().isoformat()
+            }]
+        )
+        logger.info("向量数据库初始化完成")
+        
+    def _init_mock_data(self):
+        """初始化mock数据"""
+        logger.info("初始化mock数据...")
+        mock_embeddings = MagicMock()
+        mock_embeddings.embed_documents.return_value = [[0.1] * 1536, [0.2] * 1536]
+        mock_embeddings.embed_query.return_value = [0.1] * 1536
+        self.embeddings = mock_embeddings
+        
+        mock_contexts = MagicMock()
+        mock_contexts.similarity_search.return_value = [
+            Document(page_content="测试上下文1"),
+            Document(page_content="测试上下文2")
+        ]
+        self.contexts_store = mock_contexts
+        
+        mock_templates = MagicMock()
+        mock_templates.similarity_search.return_value = [
+            Document(page_content="测试模板1"),
+            Document(page_content="测试模板2")
+        ]
+        self.templates_store = mock_templates
+        logger.info("Mock数据初始化完成") 

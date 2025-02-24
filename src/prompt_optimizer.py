@@ -24,34 +24,49 @@ logger = logging.getLogger(__name__)
 class PromptOptimizer:
     """提示词优化器"""
 
-    def __init__(self, model_name: str = OPENAI_MODEL, use_mock: bool = False):
+    def __init__(
+            self,
+            model_name: str = OPENAI_MODEL,
+            use_mock: bool = False,
+            temperature: float = PROMPT_OPTIMIZATION_TEMPERATURE,
+            max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS
+        ):
         """初始化优化器
 
         Args:
             model_name: 模型名称
             use_mock: 是否使用mock数据
+            temperature: 温度参数
+            max_tokens: 最大token数
         """
         self.model_name = model_name
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
         self.vector_store = VectorStore(use_mock=use_mock)
         self.agent = PromptOptimizationAgent(
             vector_store=self.vector_store,
-            is_testing=use_mock
+            is_testing=use_mock,
+            temperature=temperature,
+            max_tokens=max_tokens
         )
 
-    def optimize(self, prompt: str) -> Dict[str, Any]:
+    def optimize(self, prompt: str) -> str:
         """优化提示词
 
         Args:
             prompt: 原始提示词
 
         Returns:
-            Dict[str, Any]: 优化结果
+            str: 优化后的提示词
         """
         if not prompt:
             raise Exception("提示词不能为空")
 
         try:
             result = self.agent.optimize_prompt(prompt)
+            if isinstance(result, dict):
+                return result.get("optimized_prompt", "")
             return result
         except Exception as e:
             logger.error(f"优化提示词失败: {str(e)}")

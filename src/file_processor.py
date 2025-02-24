@@ -6,7 +6,7 @@ import patoolib
 from pathlib import Path
 from typing import List, Dict, Any
 import logging
-from utils.vector_store import VectorStore
+from src.utils.vector_store import VectorStore
 from langchain_community.document_loaders import (
     TextLoader,
     UnstructuredMarkdownLoader,

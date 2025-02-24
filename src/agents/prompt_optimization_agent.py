@@ -86,21 +86,32 @@ class MockLLM(Runnable):
 class PromptOptimizationAgent:
     """Prompt优化Agent"""
     
-    def __init__(self, vector_store, is_testing=False):
+    def __init__(
+            self,
+            vector_store,
+            is_testing=False,
+            temperature: float = PROMPT_OPTIMIZATION_TEMPERATURE,
+            max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS
+        ):
         """初始化优化代理
 
         Args:
             vector_store: 向量存储实例
             is_testing: 是否为测试模式
+            temperature: 温度参数
+            max_tokens: 最大token数
         """
         self.vector_store = vector_store
         self.is_testing = is_testing
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
         if self.is_testing:
             self.llm = MockLLM()
         else:
             self.llm = ChatOpenAI(
-                temperature=0.7,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
                 model_name=OPENAI_MODEL,
                 api_key=OPENAI_API_KEY,
                 base_url=OPENAI_BASE_URL
@@ -259,7 +270,20 @@ class PromptOptimizationAgent:
         return self.vector_store.get_prompt_history()
         
     def set_model_parameters(self, temperature: float, max_tokens: int):
-        """设置模型参数"""
+        """设置模型参数
+        
+        Args:
+            temperature: 温度参数
+            max_tokens: 最大token数
+        """
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
         if not self.is_testing:
-            self.llm.temperature = temperature
-            self.llm.max_tokens = max_tokens 
+            self.llm = ChatOpenAI(
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                model_name=OPENAI_MODEL,
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL
+            ) 

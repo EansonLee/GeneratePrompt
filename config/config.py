@@ -14,9 +14,9 @@ DATA_DIR = BASE_DIR / "data"
 VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", str(DATA_DIR / "vector_store"))
 
 # OpenAI配置
-OPENAI_API_KEY = "sk-FastAPITi1j0BFd0pIv5oonN0pozt1mDi0SRz5E3mKCje0DE"
-OPENAI_BASE_URL = "https://api.free.fastapi.ai/v1"
-OPENAI_MODEL = "free-gpt-4o"
+OPENAI_API_KEY = "sk-FastAPIvE1M0Ktm0qjx1IZm4LIA1bVdR0mZ0aOtH3BCz2wjn"
+OPENAI_BASE_URL = "https://api.fastapi.ai/v1"
+OPENAI_MODEL = "gpt-3.5-turbo"
 DEFAULT_MODEL_NAME = OPENAI_MODEL
 
 # 应用配置
@@ -28,14 +28,14 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
 # 向量数据库配置
-EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
 VECTOR_STORE_CONFIG = {
     "collection_name": "prompt_optimization",
     "distance_strategy": "cosine",
     "persist_directory": VECTOR_DB_PATH,
     "CHUNK_SIZE": 1000,
     "CHUNK_OVERLAP": 200,
-    "SEPARATORS": ["\n\n", "\n", "。", "，", " ", ""]
+    "SEPARATORS": ["\n\n", "\n", " ", ""]
 }
 
 # 提示模板配置
