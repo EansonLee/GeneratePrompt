@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# 初始化全局向量存储
+try:
+    logger.info("初始化全局向量存储...")
+    vector_store = VectorStore(use_mock=False)
+    logger.info("全局向量存储初始化成功")
+except Exception as e:
+    logger.error(f"全局向量存储初始化失败: {str(e)}")
+    if DEBUG:
+        logger.debug("详细错误信息:", exc_info=True)
+    logger.info("使用mock数据初始化向量存储...")
+    vector_store = VectorStore(use_mock=True)
+
 app = FastAPI(
     title="Prompt生成优化API",
     description="提供Prompt模板生成和优化的API服务",
@@ -44,18 +56,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 初始化向量存储和文件处理器
-try:
-    logger.info("初始化向量存储...")
-    vector_store = VectorStore(use_mock=False)
-    logger.info("向量存储初始化成功")
-except Exception as e:
-    logger.error(f"向量存储初始化失败: {str(e)}")
-    if DEBUG:
-        logger.debug("详细错误信息:", exc_info=True)
-    logger.info("使用mock数据初始化向量存储...")
-    vector_store = VectorStore(use_mock=True)
-
+# 初始化文件处理器
 file_processor = FileProcessor(UPLOAD_DIR, vector_store)
 
 class PromptRequest(BaseModel):
@@ -66,43 +67,68 @@ class TemplateRequest(BaseModel):
     context_files: Optional[List[str]] = None
 
 @app.post("/api/generate-template")
-async def generate_template(request: TemplateRequest):
-    """生成模板prompt的API"""
+async def generate_template(request: TemplateRequest) -> Dict[str, Any]:
+    """生成模板的API
+    
+    Args:
+        request: 请求体
+        
+    Returns:
+        Dict[str, Any]: 生成结果
+    """
     try:
         logger.info("开始生成模板...")
-        generator = TemplateGenerator(
-            model_name=OPENAI_MODEL,
-            temperature=TEMPLATE_GENERATION_CONFIG["temperature"],
-            max_tokens=TEMPLATE_GENERATION_CONFIG["max_tokens"],
-            max_contexts=TEMPLATE_GENERATION_CONFIG["max_contexts"],
-            max_templates=TEMPLATE_GENERATION_CONFIG["max_templates"]
-        )
-        template = generator.generate()
+        
+        # 使用全局向量存储实例
+        template_generator = TemplateGenerator()
+        template_generator.vector_store = vector_store
+        
+        template = await template_generator.generate()
         logger.info("模板生成成功")
-        return {"status": "success", "template": template}
+        
+        return {
+            "status": "success",
+            "template": template
+        }
+        
     except Exception as e:
-        logger.error(f"生成模板失败: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"生成模板失败: {error_msg}")
         if DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/api/optimize-prompt")
-async def optimize_prompt(request: PromptRequest):
-    """优化prompt的API"""
+async def optimize_prompt(request: PromptRequest) -> Dict[str, Any]:
+    """优化prompt的API
+    
+    Args:
+        request: 请求体
+        
+    Returns:
+        Dict[str, Any]: 优化结果
+    """
     try:
         logger.info("开始优化prompt...")
-        optimizer = PromptOptimizer(
-            temperature=PROMPT_OPTIMIZATION_TEMPERATURE,
-            max_tokens=PROMPT_OPTIMIZATION_MAX_TOKENS
-        )
-        optimized = optimizer.optimize(request.prompt)
+        
+        # 使用全局向量存储实例
+        optimizer = PromptOptimizer()
+        optimizer.vector_store = vector_store
+        
+        optimized = await optimizer.optimize(request.prompt)
         logger.info("Prompt优化成功")
-        return {"status": "success", "optimized_prompt": optimized}
+        
+        return {
+            "status": "success",
+            "optimized_prompt": optimized
+        }
+        
     except Exception as e:
-        logger.error(f"优化prompt失败: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"优化prompt失败: {error_msg}")
         if DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/api/upload-context")
 async def upload_context(
@@ -174,4 +200,4 @@ async def health_check():
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=DEBUG) 
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=DEBUG) 

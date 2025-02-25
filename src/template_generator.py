@@ -11,6 +11,7 @@ from config.config import (
 )
 from src.utils.vector_store import VectorStore
 from src.agents.template_generation_agent import TemplateGenerationAgent
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,8 @@ class TemplateGenerator:
             max_contexts: int = TEMPLATE_GENERATION_CONFIG["max_contexts"],
             max_templates: int = TEMPLATE_GENERATION_CONFIG["max_templates"],
             temperature: float = TEMPLATE_GENERATION_CONFIG["temperature"],
-            max_tokens: int = TEMPLATE_GENERATION_CONFIG["max_tokens"]
+            max_tokens: int = TEMPLATE_GENERATION_CONFIG["max_tokens"],
+            vector_store: Optional[VectorStore] = None
         ):
         """初始化生成器
         
@@ -67,6 +69,7 @@ class TemplateGenerator:
             max_templates: 最大模板数量
             temperature: 温度参数
             max_tokens: 最大token数
+            vector_store: 向量存储实例
         """
         try:
             self.max_contexts = max_contexts
@@ -83,7 +86,8 @@ class TemplateGenerator:
             logger.error(f"初始化ChatOpenAI失败: {str(e)}")
             self.llm = None
             
-        self.vector_store = VectorStore()
+        # 使用传入的向量存储实例，如果没有传入则创建新实例
+        self.vector_store = vector_store or VectorStore()
         self.agent = TemplateGenerationAgent()
         
     def _get_context(self) -> Dict[str, Any]:
@@ -130,87 +134,57 @@ class TemplateGenerator:
                 
         return len(missing_fields) == 0, missing_fields
         
-    def generate(self, project_type: str = None, project_description: str = None) -> str:
-        """生成模板
+    async def generate(self, project_type: str = None, project_description: str = None) -> str:
+        """生成项目模板
         
         Args:
             project_type: 项目类型
             project_description: 项目描述
             
         Returns:
-            str: 生成的模板
-            
-        Raises:
-            Exception: 模板生成失败时抛出异常
+            str: 生成的模板内容
         """
         try:
-            logger.info("开始生成模板...")
-            
-            if self.llm is None:
-                logger.warning("使用默认模板")
-                return self._generate_default_template()
+            # 等待向量数据库就绪
+            if not self.vector_store:
+                raise ValueError("向量数据库未初始化")
                 
-            # 获取上下文
-            context = self._get_context()
+            if not await self.vector_store.wait_until_ready():
+                error = self.vector_store.get_initialization_error()
+                raise ValueError(f"向量数据库未就绪: {error}")
             
-            # 提取已有的技术信息
-            tech_info = self._extract_tech_info(context)
-            
-            # 如果提供了项目类型和描述，添加到上下文中
-            if project_type or project_description:
-                context["contexts"].append({
-                    "content": f"项目类型: {project_type}\n项目描述: {project_description}",
-                    "type": "project_info"
-                })
-            
-            # 构建提示
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", TEMPLATE_SYSTEM_PROMPT),
-                ("user", f"""请根据以下信息生成一个完整的项目模板：
+            # 构建提示词
+            messages = [
+                {"role": "system", "content": TEMPLATE_SYSTEM_PROMPT},
+                {"role": "user", "content": f"""
+请根据以下信息生成项目模板：
 
-上下文信息：
-{self._format_context(context)}
+项目类型：{project_type or '未指定'}
+项目描述：{project_description or '未指定'}
 
-已提取的技术信息：
-{self._format_tech_info(tech_info)}
-
-请确保生成的模板包含所有必要的部分，并与已有的技术选型保持一致。
-如果某些信息缺失，请使用合理的默认值补充。""")
-            ])
+请生成一个完整的项目模板，包含所有必要的技术选型和实现方案。
+"""}
+            ]
             
-            # 生成模板
-            messages = prompt.format_messages()
-            response = self.llm.invoke(messages)
-            template = response.content
+            # 调用语言模型
+            response = await self.llm.ainvoke(messages)
             
-            if not template or len(template.strip()) == 0:
-                logger.warning("生成的模板为空，使用默认模板")
-                return self._generate_default_template()
-            
-            # 验证模板
-            logger.info("验证模板...")
-            is_valid, missing_fields = self.validate_template(template)
-            
-            if not is_valid:
-                error_msg = f"生成的模板缺少以下必要信息: {', '.join(missing_fields)}"
-                logger.error(error_msg)
-                raise Exception(error_msg)
+            if not response or not response.content:
+                raise ValueError("模板生成失败：未获得有效响应")
                 
-            logger.info("模板验证通过")
+            template_content = response.content
             
             # 保存到向量数据库
-            logger.info("保存模板到向量数据库...")
-            self.vector_store.add_template(template)
-            
-            # 验证保存
-            if not self.vector_store.verify_insertion(template, "templates"):
-                logger.warning("模板可能未成功保存到向量数据库")
-            
-            return template
+            if self.vector_store:
+                # 使用add_template方法而不是add_texts
+                self.vector_store.add_template(template_content)
+                logger.info("模板已保存到向量数据库")
+                
+            return template_content
             
         except Exception as e:
             logger.error(f"生成模板失败: {str(e)}")
-            return self._generate_default_template()
+            raise
 
     def _extract_tech_info(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """从上下文中提取技术信息

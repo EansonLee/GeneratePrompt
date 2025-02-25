@@ -29,7 +29,8 @@ class PromptOptimizer:
             model_name: str = OPENAI_MODEL,
             use_mock: bool = False,
             temperature: float = PROMPT_OPTIMIZATION_TEMPERATURE,
-            max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS
+            max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS,
+            vector_store: Optional[VectorStore] = None
         ):
         """初始化优化器
 
@@ -38,12 +39,28 @@ class PromptOptimizer:
             use_mock: 是否使用mock数据
             temperature: 温度参数
             max_tokens: 最大token数
+            vector_store: 向量存储实例
         """
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
         
-        self.vector_store = VectorStore(use_mock=use_mock)
+        # 使用传入的向量存储实例，如果没有传入则创建新实例
+        if vector_store:
+            self.vector_store = vector_store
+        else:
+            try:
+                logger.info("创建新的向量存储实例...")
+                self.vector_store = VectorStore(use_mock=False)  # 强制使用真实数据
+                logger.info("向量存储实例创建成功")
+            except Exception as e:
+                logger.error(f"创建向量存储实例失败: {str(e)}")
+                if use_mock:
+                    logger.warning("回退到mock模式")
+                    self.vector_store = VectorStore(use_mock=True)
+                else:
+                    raise
+                    
         self.agent = PromptOptimizationAgent(
             vector_store=self.vector_store,
             is_testing=use_mock,
@@ -51,7 +68,7 @@ class PromptOptimizer:
             max_tokens=max_tokens
         )
 
-    def optimize(self, prompt: str) -> str:
+    async def optimize(self, prompt: str) -> str:
         """优化提示词
 
         Args:
@@ -64,7 +81,7 @@ class PromptOptimizer:
             raise Exception("提示词不能为空")
 
         try:
-            result = self.agent.optimize_prompt(prompt)
+            result = await self.agent.optimize_prompt(prompt)
             if isinstance(result, dict):
                 return result.get("optimized_prompt", "")
             return result
@@ -123,7 +140,7 @@ class PromptOptimizer:
         ]
         return any(pattern in file_path for pattern in ignore_patterns)
 
-    def add_react_code(self, code: str, metadata: Dict[str, Any]) -> bool:
+    async def add_react_code(self, code: str, metadata: Dict[str, Any]) -> bool:
         """添加React代码示例
         
         Args:
@@ -134,25 +151,25 @@ class PromptOptimizer:
             bool: 是否添加成功
         """
         try:
-            self.vector_store.add_react_code(code, metadata)
+            await self.vector_store.add_react_code(code, metadata)
             return True
         except Exception as e:
             logger.error(f"添加React代码失败: {str(e)}")
             raise
             
-    def add_best_practice(self, practice: str, category: str):
+    async def add_best_practice(self, practice: str, category: str):
         """添加最佳实践到向量数据库"""
         try:
-            self.vector_store.add_texts([practice], [{"category": category}])
+            await self.vector_store.add_texts([practice], [{"category": category}])
             logger.info(f"成功添加最佳实践，类别: {category}")
         except Exception as e:
             logger.error(f"添加最佳实践失败: {str(e)}")
             raise
             
-    def add_reference_content(self, content: str, metadata: Dict[str, Any]):
+    async def add_reference_content(self, content: str, metadata: Dict[str, Any]):
         """添加参考内容到向量数据库"""
         try:
-            self.vector_store.add_texts([content], [metadata])
+            await self.vector_store.add_texts([content], [metadata])
             logger.info(f"成功添加参考内容，类型: {metadata.get('type')}")
         except Exception as e:
             logger.error(f"添加参考内容失败: {str(e)}")
@@ -162,10 +179,10 @@ class PromptOptimizer:
         """清除历史记录"""
         self.agent.clear_memory()
         
-    def optimize_prompt(self, prompt: str) -> str:
+    async def optimize_prompt(self, prompt: str) -> str:
         """优化提示"""
         # 使用专门的Agent进行提示优化
-        optimized_prompt = self.agent.execute(prompt)
+        optimized_prompt = await self.agent.execute(prompt)
         
         # 获取优化历史
         optimization_history = self.agent.get_optimization_history()
@@ -188,7 +205,7 @@ class PromptOptimizer:
         
         return "\n".join(report)
 
-    def process_project_file(self, file_path: Union[str, Path], file_type: str = None) -> bool:
+    async def process_project_file(self, file_path: Union[str, Path], file_type: str = None) -> bool:
         """处理项目文件
         
         Args:
@@ -216,7 +233,7 @@ class PromptOptimizer:
                 
             # 根据文件类型进行处理
             if file_type == 'react_component':
-                self.add_react_code(content, {
+                await self.add_react_code(content, {
                     "type": file_type,
                     "file_name": file_path.name,
                     "file_path": str(file_path),
@@ -231,7 +248,7 @@ class PromptOptimizer:
                 return True
             elif file_type == 'doc':
                 # 处理文档文件
-                self.add_reference_content(content, {
+                await self.add_reference_content(content, {
                     "type": file_type,
                     "file_name": file_path.name,
                     "file_path": str(file_path),
@@ -247,7 +264,7 @@ class PromptOptimizer:
             logger.error(f"处理文件失败: {str(e)}")
             return False
             
-    def process_project_directory(self, directory: Union[str, Path]) -> Dict[str, int]:
+    async def process_project_directory(self, directory: Union[str, Path]) -> Dict[str, int]:
         """处理项目目录
         
         Args:
@@ -273,7 +290,7 @@ class PromptOptimizer:
             for file_path in directory.rglob("*"):
                 if file_path.is_file() and not self.should_ignore(str(file_path)):
                     file_type = self.detect_file_type(str(file_path))
-                    success = self.process_project_file(file_path, file_type)
+                    success = await self.process_project_file(file_path, file_type)
                     if success:
                         stats[file_type] += 1
                     else:
@@ -297,7 +314,7 @@ class PromptOptimizer:
             "language": "zh-CN"
         }
 
-    def optimize_with_template(self, template: str, params: Dict[str, str]) -> Dict[str, Any]:
+    async def optimize_with_template(self, template: str, params: Dict[str, str]) -> Dict[str, Any]:
         """使用模板优化提示
         
         Args:
@@ -312,7 +329,7 @@ class PromptOptimizer:
             prompt = template.format(**params)
             
             # 使用标准优化流程
-            return self.optimize(prompt)
+            return await self.optimize(prompt)
         except Exception as e:
             logger.error(f"使用模板优化提示失败: {str(e)}")
             raise 

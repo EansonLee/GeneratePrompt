@@ -20,7 +20,7 @@ OPENAI_MODEL = "gpt-3.5-turbo"
 DEFAULT_MODEL_NAME = OPENAI_MODEL
 
 # 应用配置
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG = os.getenv("DEBUG", "False").lower() == "false"
 LOG_LEVEL = "INFO"
 
 # 文本分块配置

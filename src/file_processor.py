@@ -109,92 +109,71 @@ class FileProcessor:
         """
         try:
             logger.info(f"开始处理文件: {file_path}")
+            logger.info(f"文件大小: {file_path.stat().st_size / 1024:.2f} KB")
+            logger.info(f"处理模式: {'目录模式' if is_directory else '文件模式'}")
             
             # 获取文件类型
             file_type = self.get_file_type(file_path.name)
             logger.info(f"文件类型: {file_type}")
             
+            if not self.is_supported_file(file_path.name):
+                error_msg = f"不支持的文件类型: {Path(file_path).suffix}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
             # 如果是压缩文件且需要作为目录处理
             if file_type == 'archive' and is_directory:
-                logger.info("处理压缩文件...")
+                logger.info("开始处理压缩文件...")
                 return await self.process_archive(file_path)
-                
-            # 处理文本类文件和样式文件
-            if file_type in ['text', 'markdown', 'python', 'javascript', 'typescript', 'react', 'json', 'yaml', 'css', 'scss', 'less']:
-                try:
-                    logger.info("读取文件内容...")
-                    content = None
-                    
-                    # 尝试不同编码读取文件
-                    for encoding in ['utf-8', 'gbk', 'gb2312', 'iso-8859-1']:
-                        try:
-                            content = file_path.read_text(encoding=encoding)
-                            if content and len(content.strip()) > 0:
-                                logger.info(f"成功使用 {encoding} 编码读取文件")
-                                break
-                        except UnicodeDecodeError:
-                            logger.debug(f"{encoding} 编码读取失败，尝试下一个编码")
-                            continue
-                    
-                    if content is None or len(content.strip()) == 0:
-                        logger.warning(f"文件内容为空: {file_path}")
-                        return {
-                            "status": "warning",
-                            "file_type": file_type,
-                            "message": "文件内容为空"
-                        }
-                    
-                    # 提取关键信息
-                    extracted_info = self._extract_key_information(content, file_path.name)
-                    
-                    # 如果是样式文件，添加样式相关信息
-                    if file_type in ['css', 'scss', 'less']:
-                        style_info = self._extract_style_information(content, file_type)
-                        if style_info:
-                            extracted_info.update(style_info)
-                    
-                    logger.info("开始添加文本到向量数据库...")
-                    metadata = {
-                        "file_name": file_path.name,
-                        "file_type": file_type,
-                        "file_path": str(file_path),
-                        "timestamp": datetime.now().isoformat(),
-                        **extracted_info  # 添加提取的信息到元数据
-                    }
-                    
-                    chunks = self.vector_store.add_texts([content], [metadata])
-                    
-                    # 验证插入
-                    if self.vector_store.verify_insertion(content):
-                        logger.info("文件内容成功添加到向量数据库")
-                        return {
-                            "status": "success",
-                            "file_type": file_type,
-                            "chunks": len(chunks) if chunks else 0,
-                            "extracted_info": extracted_info
-                        }
-                    else:
-                        logger.error("文件内容可能未成功添加到向量数据库")
-                        return {
-                            "status": "error",
-                            "file_type": file_type,
-                            "message": "向量数据库插入验证失败"
-                        }
-                        
-                except Exception as e:
-                    logger.error(f"处理文件失败: {str(e)}")
-                    return {
-                        "status": "error",
-                        "file_type": file_type,
-                        "message": str(e)
-                    }
             
-            logger.warning(f"不支持的文件类型: {file_type}")
-            return {
-                "status": "warning",
+            # 读取文件内容
+            logger.info("读取文件内容...")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            logger.info(f"文件内容长度: {len(content)} 字符")
+            
+            # 提取关键信息
+            logger.info("提取文件关键信息...")
+            extracted_info = self._extract_key_information(content, file_path.name)
+            logger.info(f"提取的信息: {extracted_info}")
+            
+            # 准备元数据
+            metadata = {
+                "file_name": file_path.name,
                 "file_type": file_type,
-                "message": f"不支持的文件类型: {file_type}"
+                "file_path": str(file_path),
+                "timestamp": datetime.now().isoformat(),
+                **extracted_info
             }
+            logger.info(f"完整元数据: {metadata}")
+            
+            # 等待向量数据库就绪
+            if not await self.vector_store.wait_until_ready():
+                error = self.vector_store.get_initialization_error()
+                raise ValueError(f"向量数据库未就绪: {error}")
+            
+            # 添加到向量数据库
+            logger.info("添加到向量数据库...")
+            chunks = self.vector_store.add_texts([content], [metadata])
+            logger.info(f"添加完成，生成了 {len(chunks) if chunks else 0} 个文本块")
+            
+            # 验证插入
+            if self.vector_store.verify_insertion(content):
+                logger.info("文件内容成功添加到向量数据库")
+                return {
+                    "status": "success",
+                    "file_type": file_type,
+                    "chunks": len(chunks) if chunks else 0,
+                    "extracted_info": extracted_info
+                }
+            else:
+                error_msg = "文件内容可能未成功添加到向量数据库"
+                logger.error(error_msg)
+                return {
+                    "status": "error",
+                    "file_type": file_type,
+                    "message": error_msg
+                }
             
         except Exception as e:
             logger.error(f"处理文件失败 {file_path}: {str(e)}")

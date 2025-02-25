@@ -20,6 +20,7 @@ import numpy as np
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import requests
 import json
+from pathlib import Path
 
 # 设置日志级别
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ class VectorStore:
             use_mock: 是否使用mock数据
         """
         self.is_testing = os.getenv("TESTING", "False").lower() == "true"
+        self.is_ready = False
+        self.initialization_error = None
         
         # 打印配置信息
         logger.info("==================== 当前配置信息 ====================")
@@ -53,24 +56,71 @@ class VectorStore:
         )
         logger.info("文本分割器初始化完成")
         
-        # 根据配置初始化存储
-        if use_mock or self.is_testing:
-            self._init_mock_data()
-        else:
-            try:
-                self._init_real_api()
-            except Exception as e:
-                logger.error(f"真实API初始化失败，切换到mock模式: {str(e)}")
-                if DEBUG:
-                    logger.debug("详细错误信息:", exc_info=True)
+        # 强制使用真实API
+        try:
+            self._init_real_api()
+            self.is_ready = True
+        except Exception as e:
+            logger.error(f"真实API初始化失败: {str(e)}")
+            self.initialization_error = str(e)
+            if DEBUG:
+                logger.debug("详细错误信息:", exc_info=True)
+            if use_mock or self.is_testing:
+                logger.warning("回退到mock模式")
                 self._init_mock_data()
+                self.is_ready = True
+            else:
+                raise
         
         self.prompt_history = []
     
+    def is_initialized(self) -> bool:
+        """检查向量数据库是否已初始化完成
+        
+        Returns:
+            bool: 是否初始化完成
+        """
+        return self.is_ready
+
+    def get_initialization_error(self) -> str:
+        """获取初始化错误信息
+        
+        Returns:
+            str: 错误信息
+        """
+        return self.initialization_error
+
+    async def wait_until_ready(self, timeout: int = 30) -> bool:
+        """等待向量数据库就绪
+        
+        Args:
+            timeout: 超时时间（秒）
+            
+        Returns:
+            bool: 是否就绪
+        """
+        import asyncio
+        start_time = asyncio.get_event_loop().time()
+        while not self.is_ready:
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                return False
+            await asyncio.sleep(1)
+        return True
+
     def _init_real_api(self):
         """初始化真实API"""
         try:
             logger.info("初始化向量数据库...")
+            logger.info(f"使用的 API Base URL: {OPENAI_BASE_URL}")
+            logger.info(f"使用的 Embedding Model: text-embedding-ada-002")
+            
+            # 验证API配置
+            if not OPENAI_API_KEY:
+                raise ValueError("未设置 OPENAI_API_KEY")
+                
+            if not OPENAI_BASE_URL:
+                raise ValueError("未设置 OPENAI_BASE_URL")
+            
             self.embeddings = OpenAIEmbeddings(
                 model=EMBEDDING_MODEL,
                 openai_api_key=OPENAI_API_KEY,
@@ -89,10 +139,15 @@ class VectorStore:
             )
             
             # 测试嵌入功能
-            self._test_embeddings()
+            logger.info("测试嵌入功能...")
+            test_result = self._test_embeddings()
+            if not test_result:
+                raise Exception("嵌入功能测试失败")
             
             # 初始化存储
+            logger.info("初始化向量存储...")
             self._init_stores()
+            logger.info("向量数据库初始化完成")
             
         except Exception as e:
             logger.error(f"向量数据库初始化失败: {str(e)}")
@@ -300,31 +355,30 @@ class VectorStore:
             raise Exception(f"搜索模板失败: {str(e)}")
         
     def add_texts(self, texts: List[str], metadatas: List[Dict[str, Any]] = None) -> List[str]:
-        """添加文本到向量数据库
-        
-        Args:
-            texts: 要添加的文本列表
-            metadatas: 文本对应的元数据列表
-            
-        Returns:
-            List[str]: 添加的文档ID列表
-        """
+        """添加文本到向量数据库"""
         try:
             logger.info(f"开始添加{len(texts)}条文本到向量数据库")
+            logger.info("文本内容预览:")
             for i, (text, metadata) in enumerate(zip(texts, metadatas or [{}] * len(texts))):
-                logger.debug(f"处理第{i+1}条文本: {text[:100]}...")
-                logger.debug(f"元数据: {metadata}")
-                
+                logger.info(f"文本 {i+1}:")
+                logger.info(f"- 前100字符: {text[:100]}...")
+                logger.info(f"- 元数据: {metadata}")
+                logger.info(f"- 总字符数: {len(text)}")
+            
             documents = self.text_splitter.create_documents(texts, metadatas=metadatas)
             logger.info(f"文本分块完成，共{len(documents)}个块")
+            logger.info(f"平均块大小: {sum(len(doc.page_content) for doc in documents) / len(documents):.2f}字符")
             
             self.contexts_store.add_documents(documents)
             logger.info("文档已添加到向量数据库")
             
             # 验证插入
             verification_results = [self.verify_insertion(text) for text in texts]
+            success_rate = sum(verification_results) / len(verification_results) * 100
+            logger.info(f"文档验证完成，成功率: {success_rate:.2f}%")
+            
             if not all(verification_results):
-                logger.warning("部分文本可能未成功插入")
+                logger.warning("部分文本可能未成功插入，请检查日志")
             
             return ["doc_" + str(i) for i in range(len(texts))]
             
@@ -401,14 +455,17 @@ class VectorStore:
         """
         try:
             store = self.contexts_store if store_type == "contexts" else self.templates_store
-            results = store.similarity_search(content[:100], k=1)  # 使用内容前100个字符进行搜索
+            # 使用内容的前200个字符进行搜索，避免过长内容影响相似度
+            search_content = content[:200]
+            results = store.similarity_search(search_content, k=1)
             
             if not results:
-                logger.warning(f"未找到插入的内容: {content[:100]}...")
+                logger.warning(f"未找到插入的内容: {search_content}...")
                 return False
                 
-            similarity_score = self.calculate_similarity(content, results[0].page_content)
-            is_similar = similarity_score > 0.9  # 设置相似度阈值
+            similarity_score = self.calculate_similarity(search_content, results[0].page_content[:200])
+            # 降低相似度阈值到0.7
+            is_similar = similarity_score > 0.7
             
             if not is_similar:
                 logger.warning(f"找到的内容相似度较低 ({similarity_score}): {results[0].page_content[:100]}...")
@@ -450,26 +507,65 @@ class VectorStore:
         test_text = "测试文本"
         test_embedding = self.embeddings.embed_query(test_text)
         logger.info(f"嵌入测试成功，向量维度: {len(test_embedding)}")
+        return True
         
     def _init_stores(self):
         """初始化存储"""
         logger.info("初始化向量存储...")
-        self.contexts_store = FAISS.from_texts(
-            ["示例上下文"],
-            self.embeddings,
-            metadatas=[{
-                "type": "context",
-                "timestamp": datetime.now().isoformat()
-            }]
-        )
-        self.templates_store = FAISS.from_texts(
-            ["示例模板"],
-            self.embeddings,
-            metadatas=[{
-                "type": "template",
-                "timestamp": datetime.now().isoformat()
-            }]
-        )
+        
+        # 确保向量存储目录存在
+        vector_store_path = Path(VECTOR_STORE_CONFIG["persist_directory"])
+        vector_store_path.mkdir(parents=True, exist_ok=True)
+        
+        contexts_path = vector_store_path / "contexts"
+        templates_path = vector_store_path / "templates"
+        
+        try:
+            # 尝试加载已存在的向量存储
+            if contexts_path.exists():
+                self.contexts_store = FAISS.load_local(
+                    str(contexts_path), 
+                    self.embeddings,
+                    allow_dangerous_deserialization=True  # 允许反序列化
+                )
+                logger.info("成功加载已存在的contexts向量存储")
+            else:
+                self.contexts_store = FAISS.from_texts(
+                    ["示例上下文"],
+                    self.embeddings,
+                    metadatas=[{
+                        "type": "context",
+                        "timestamp": datetime.now().isoformat()
+                    }]
+                )
+                # 保存向量存储
+                self.contexts_store.save_local(str(contexts_path))
+                logger.info("创建并保存新的contexts向量存储")
+                
+            if templates_path.exists():
+                self.templates_store = FAISS.load_local(
+                    str(templates_path), 
+                    self.embeddings,
+                    allow_dangerous_deserialization=True  # 允许反序列化
+                )
+                logger.info("成功加载已存在的templates向量存储")
+            else:
+                self.templates_store = FAISS.from_texts(
+                    ["示例模板"],
+                    self.embeddings,
+                    metadatas=[{
+                        "type": "template",
+                        "timestamp": datetime.now().isoformat()
+                    }]
+                )
+                # 保存向量存储
+                self.templates_store.save_local(str(templates_path))
+                logger.info("创建并保存新的templates向量存储")
+                
+        except Exception as e:
+            logger.error(f"初始化向量存储失败: {str(e)}")
+            raise
+            
         logger.info("向量数据库初始化完成")
         
     def _init_mock_data(self):

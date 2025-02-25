@@ -22,6 +22,7 @@ from langchain_core.runnables import RunnablePassthrough, Runnable
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -84,190 +85,214 @@ class MockLLM(Runnable):
         return [self.invoke(input) for input in inputs]
 
 class PromptOptimizationAgent:
-    """Prompt优化Agent"""
+    """提示词优化Agent"""
     
     def __init__(
             self,
-            vector_store,
-            is_testing=False,
+            vector_store: VectorStore,
+            is_testing: bool = False,
             temperature: float = PROMPT_OPTIMIZATION_TEMPERATURE,
             max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS
         ):
-        """初始化优化代理
-
-        Args:
-            vector_store: 向量存储实例
-            is_testing: 是否为测试模式
-            temperature: 温度参数
-            max_tokens: 最大token数
-        """
         self.vector_store = vector_store
         self.is_testing = is_testing
         self.temperature = temperature
         self.max_tokens = max_tokens
-
-        if self.is_testing:
-            self.llm = MockLLM()
-        else:
-            self.llm = ChatOpenAI(
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                model_name=OPENAI_MODEL,
-                api_key=OPENAI_API_KEY,
-                base_url=OPENAI_BASE_URL
-            )
-
-        # 创建工具列表
-        self.tools = [
-            Tool(
-                name="search_contexts",
-                func=self.vector_store.search_contexts,
-                description="搜索相关上下文"
-            ),
-            Tool(
-                name="search_templates",
-                func=self.vector_store.search_templates,
-                description="搜索相关模板"
-            )
-        ]
-
-        # 创建工具节点
-        self.tool_nodes = {
-            "search_contexts": ToolNode(tools=[self.tools[0]]),
-            "search_templates": ToolNode(tools=[self.tools[1]])
-        }
-
-        # 创建工作流图
-        self.workflow = self._create_workflow()
-
-    def _create_workflow(self) -> StateGraph:
-        """创建工作流图"""
-        # 创建状态图
-        workflow = StateGraph(AgentState)
-
-        # 添加节点
-        workflow.add_node("get_contexts", self._get_contexts)
-        workflow.add_node("get_templates", self._get_templates)
-        workflow.add_node("optimize_prompt", self._optimize_prompt)
-
-        # 添加边
-        workflow.add_edge("get_contexts", "get_templates")
-        workflow.add_edge("get_templates", "optimize_prompt")
-        workflow.add_edge("optimize_prompt", END)
-
-        # 设置入口节点
-        workflow.set_entry_point("get_contexts")
-
-        # 编译工作流
-        return workflow.compile()
-
-    def _get_contexts(self, state: AgentState) -> AgentState:
-        """获取上下文"""
-        try:
-            contexts = self.vector_store.search_contexts(limit=3)
-            state["contexts"] = contexts
-            state["next_step"] = "get_templates"
-            return state
-        except Exception as e:
-            logger.error(f"获取上下文失败: {str(e)}")
-            raise
-
-    def _get_templates(self, state: AgentState) -> AgentState:
-        """获取模板"""
-        try:
-            templates = self.vector_store.search_templates(limit=2)
-            state["templates"] = templates
-            state["next_step"] = "optimize_prompt"
-            return state
-        except Exception as e:
-            logger.error(f"获取模板失败: {str(e)}")
-            raise
-
-    def _optimize_prompt(self, state: AgentState) -> AgentState:
-        """优化提示"""
-        try:
-            # 构建优化提示
-            optimization_prompt = f"""
-            请基于以下上下文和模板，优化用户的提示:
-
-            上下文:
-            {state['contexts']}
-
-            模板:
-            {state['templates']}
-
-            用户提示:
-            {state['prompt']}
-
-            请生成优化后的提示。要求：
-            1. 提示应该更加具体和详细
-            2. 包含必要的技术要求和约束
-            3. 明确输出的格式和质量标准
-            4. 考虑项目的整体上下文
-            """
-
-            # 执行优化
-            result = self.llm.invoke(optimization_prompt)
-
-            # 提取优化后的提示
-            optimized_prompt = str(result.content)
-
-            # 更新状态
-            state["optimized_prompt"] = optimized_prompt
-            state["next_step"] = END
-
-            # 保存优化历史
-            self.vector_store.add_prompt_history(
-                state["prompt"],
-                optimized_prompt
-            )
-
-            return state
-
-        except Exception as e:
-            logger.error(f"优化提示失败: {str(e)}")
-            raise
-
-    def optimize_prompt(self, prompt: str) -> Dict[str, Any]:
-        """优化用户输入的提示
-
+        self.optimization_history = []
+        
+        # 初始化LLM
+        self.llm = ChatOpenAI(
+            model_name=OPENAI_MODEL,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL
+        )
+        
+    async def optimize_prompt(self, prompt: str) -> str:
+        """优化提示词
+        
         Args:
-            prompt: 原始提示
-
+            prompt: 原始提示词
+            
         Returns:
-            Dict[str, Any]: 包含优化后提示和其他信息的结构化输出
+            str: 优化后的提示词
         """
         try:
-            # 初始化状态
-            initial_state: AgentState = {
-                "messages": [],
-                "prompt": prompt,
-                "contexts": [],
-                "templates": [],
-                "optimized_prompt": "",
-                "next_step": "get_contexts"
-            }
-
-            # 执行工作流
-            final_state = self.workflow.invoke(initial_state)
-
-            # 构造返回结果
-            output = {
-                "optimized_prompt": final_state["optimized_prompt"],
-                "original_prompt": prompt,
-                "contexts_used": len(final_state["contexts"]),
-                "templates_used": len(final_state["templates"])
-            }
-
-            return output
-
-        except Exception as e:
-            logger.error(f"提示优化失败: {str(e)}")
-            raise Exception(f"提示优化失败: {str(e)}")
+            # 获取相关上下文
+            contexts = self.vector_store.search_contexts(limit=5)
             
-    def get_optimization_history(self) -> List[Dict[str, str]]:
-        """获取优化历史"""
-        return self.vector_store.get_prompt_history()
+            # 构建提示
+            system_prompt = PROMPT_OPTIMIZATION_SYSTEM_PROMPT
+            user_prompt = f"""请根据以下信息优化提示词：
+
+原始提示词：
+{prompt}
+
+相关上下文：
+{self._format_contexts(contexts)}
+
+请确保优化后的提示词：
+1. 更加清晰和具体
+2. 包含必要的上下文信息
+3. 结构合理，易于理解
+4. 符合最佳实践
+"""
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # 调用LLM
+            response = await self.llm.ainvoke(messages)
+            optimized = response.content
+            
+            # 记录历史
+            self.optimization_history.append({
+                "input": prompt,
+                "output": optimized,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            return optimized
+            
+        except Exception as e:
+            logger.error(f"优化提示词失败: {str(e)}")
+            raise
+            
+    async def execute(self, prompt: str) -> str:
+        """执行优化
+        
+        Args:
+            prompt: 原始提示词
+            
+        Returns:
+            str: 优化后的提示词
+        """
+        try:
+            # 分析提示词
+            analysis = await self._analyze_prompt(prompt)
+            
+            # 获取相关最佳实践
+            best_practices = self.vector_store.search_best_practices(prompt)
+            
+            # 优化提示词
+            optimized = await self.optimize_prompt(prompt)
+            
+            # 验证优化结果
+            validation = await self._validate_optimization(prompt, optimized)
+            
+            if not validation["is_valid"]:
+                logger.warning(f"优化结果验证失败: {validation['reason']}")
+                return prompt
+                
+            return optimized
+            
+        except Exception as e:
+            logger.error(f"执行优化失败: {str(e)}")
+            return prompt
+            
+    async def _analyze_prompt(self, prompt: str) -> Dict[str, Any]:
+        """分析提示词
+        
+        Args:
+            prompt: 提示词
+            
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个提示词分析专家。"},
+                {"role": "user", "content": f"请分析以下提示词的优缺点：\n\n{prompt}"}
+            ]
+            
+            response = await self.llm.ainvoke(messages)
+            
+            return {
+                "analysis": response.content,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"分析提示词失败: {str(e)}")
+            return {
+                "analysis": "分析失败",
+                "error": str(e)
+            }
+            
+    async def _validate_optimization(self, original: str, optimized: str) -> Dict[str, Any]:
+        """验证优化结果
+        
+        Args:
+            original: 原始提示词
+            optimized: 优化后的提示词
+            
+        Returns:
+            Dict[str, Any]: 验证结果
+        """
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个提示词优化验证专家。"},
+                {"role": "user", "content": f"""请验证优化结果是否有效：
+
+原始提示词：
+{original}
+
+优化后的提示词：
+{optimized}
+
+请判断：
+1. 优化后的提示词是否保留了原始意图
+2. 是否有效改进了原始提示词
+3. 是否引入了不必要的复杂性"""}
+            ]
+            
+            response = await self.llm.ainvoke(messages)
+            content = response.content.lower()
+            
+            is_valid = "有效" in content or "改进" in content
+            reason = response.content
+            
+            return {
+                "is_valid": is_valid,
+                "reason": reason,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"验证优化结果失败: {str(e)}")
+            return {
+                "is_valid": True,  # 出错时默认通过
+                "reason": f"验证过程出错: {str(e)}"
+            }
+            
+    def _format_contexts(self, contexts: List[Dict[str, str]]) -> str:
+        """格式化上下文
+        
+        Args:
+            contexts: 上下文列表
+            
+        Returns:
+            str: 格式化后的上下文
+        """
+        result = []
+        for ctx in contexts:
+            result.append(f"- {ctx.get('content', '')}")
+        return "\n".join(result)
+        
+    def get_optimization_history(self) -> List[Dict[str, Any]]:
+        """获取优化历史
+        
+        Returns:
+            List[Dict[str, Any]]: 优化历史记录
+        """
+        return self.optimization_history
+        
+    def clear_memory(self):
+        """清除历史记录"""
+        self.optimization_history.clear()
         
     def set_model_parameters(self, temperature: float, max_tokens: int):
         """设置模型参数
@@ -278,12 +303,8 @@ class PromptOptimizationAgent:
         """
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
-        if not self.is_testing:
-            self.llm = ChatOpenAI(
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                model_name=OPENAI_MODEL,
-                api_key=OPENAI_API_KEY,
-                base_url=OPENAI_BASE_URL
-            ) 
+        self.llm = ChatOpenAI(
+            model_name=OPENAI_MODEL,
+            temperature=temperature,
+            max_tokens=max_tokens
+        ) 
