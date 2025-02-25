@@ -174,12 +174,9 @@ class TemplateGenerator:
                 
             template_content = response.content
             
-            # 保存到向量数据库
-            if self.vector_store:
-                # 使用add_template方法而不是add_texts
-                self.vector_store.add_template(template_content)
-                logger.info("模板已保存到向量数据库")
-                
+            # 移除自动保存到向量数据库的逻辑
+            # 将在用户确认后通过confirm_template API保存
+            
             return template_content
             
         except Exception as e:

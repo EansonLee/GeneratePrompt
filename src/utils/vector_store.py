@@ -29,12 +29,25 @@ logger.setLevel(LOG_LEVEL)
 class VectorStore:
     """向量数据库管理类"""
     
+    _instance = None  # 单例实例
+    _is_initialized = False  # 初始化标志
+    
+    def __new__(cls, use_mock: bool = False):
+        """单例模式实现"""
+        if cls._instance is None:
+            cls._instance = super(VectorStore, cls).__new__(cls)
+        return cls._instance
+    
     def __init__(self, use_mock: bool = False):
         """初始化向量存储
         
         Args:
             use_mock: 是否使用mock数据
         """
+        # 如果已经初始化过，直接返回
+        if self._is_initialized:
+            return
+            
         self.is_testing = os.getenv("TESTING", "False").lower() == "true"
         self.is_ready = False
         self.initialization_error = None
@@ -73,6 +86,7 @@ class VectorStore:
                 raise
         
         self.prompt_history = []
+        self._is_initialized = True
     
     def is_initialized(self) -> bool:
         """检查向量数据库是否已初始化完成
@@ -138,14 +152,12 @@ class VectorStore:
                 }
             )
             
-            # 测试嵌入功能
-            logger.info("测试嵌入功能...")
-            test_result = self._test_embeddings()
-            if not test_result:
-                raise Exception("嵌入功能测试失败")
+            # 只在首次初始化时测试嵌入功能
+            if not hasattr(self, '_embedding_tested'):
+                self._test_embeddings()
+                self._embedding_tested = True
             
             # 初始化存储
-            logger.info("初始化向量存储...")
             self._init_stores()
             logger.info("向量数据库初始化完成")
             
@@ -503,11 +515,14 @@ class VectorStore:
 
     def _test_embeddings(self):
         """测试嵌入功能"""
-        logger.info("测试嵌入功能...")
-        test_text = "测试文本"
-        test_embedding = self.embeddings.embed_query(test_text)
-        logger.info(f"嵌入测试成功，向量维度: {len(test_embedding)}")
-        return True
+        try:
+            test_text = "测试文本"
+            test_embedding = self.embeddings.embed_query(test_text)
+            logger.info(f"嵌入测试成功，向量维度: {len(test_embedding)}")
+            return True
+        except Exception as e:
+            logger.error(f"嵌入测试失败: {str(e)}")
+            raise
         
     def _init_stores(self):
         """初始化存储"""
@@ -526,19 +541,16 @@ class VectorStore:
                 self.contexts_store = FAISS.load_local(
                     str(contexts_path), 
                     self.embeddings,
-                    allow_dangerous_deserialization=True  # 允许反序列化
+                    allow_dangerous_deserialization=True
                 )
                 logger.info("成功加载已存在的contexts向量存储")
             else:
+                # 使用最小的初始化数据
                 self.contexts_store = FAISS.from_texts(
-                    ["示例上下文"],
+                    [""],  # 使用空字符串作为初始数据
                     self.embeddings,
-                    metadatas=[{
-                        "type": "context",
-                        "timestamp": datetime.now().isoformat()
-                    }]
+                    metadatas=[{"type": "context"}]
                 )
-                # 保存向量存储
                 self.contexts_store.save_local(str(contexts_path))
                 logger.info("创建并保存新的contexts向量存储")
                 
@@ -546,19 +558,16 @@ class VectorStore:
                 self.templates_store = FAISS.load_local(
                     str(templates_path), 
                     self.embeddings,
-                    allow_dangerous_deserialization=True  # 允许反序列化
+                    allow_dangerous_deserialization=True
                 )
                 logger.info("成功加载已存在的templates向量存储")
             else:
+                # 使用最小的初始化数据
                 self.templates_store = FAISS.from_texts(
-                    ["示例模板"],
+                    [""],  # 使用空字符串作为初始数据
                     self.embeddings,
-                    metadatas=[{
-                        "type": "template",
-                        "timestamp": datetime.now().isoformat()
-                    }]
+                    metadatas=[{"type": "template"}]
                 )
-                # 保存向量存储
                 self.templates_store.save_local(str(templates_path))
                 logger.info("创建并保存新的templates向量存储")
                 

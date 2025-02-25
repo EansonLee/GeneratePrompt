@@ -66,6 +66,12 @@ class PromptRequest(BaseModel):
 class TemplateRequest(BaseModel):
     context_files: Optional[List[str]] = None
 
+class ConfirmTemplateRequest(BaseModel):
+    template: str
+
+class ConfirmPromptRequest(BaseModel):
+    optimized_prompt: str
+
 @app.post("/api/generate-template")
 async def generate_template(request: TemplateRequest) -> Dict[str, Any]:
     """生成模板的API
@@ -103,7 +109,7 @@ async def optimize_prompt(request: PromptRequest) -> Dict[str, Any]:
     """优化prompt的API
     
     Args:
-        request: 请求体
+        request: 请求体，包含原始prompt和上下文文件列表
         
     Returns:
         Dict[str, Any]: 优化结果
@@ -111,16 +117,16 @@ async def optimize_prompt(request: PromptRequest) -> Dict[str, Any]:
     try:
         logger.info("开始优化prompt...")
         
-        # 使用全局向量存储实例
-        optimizer = PromptOptimizer()
-        optimizer.vector_store = vector_store
-        
-        optimized = await optimizer.optimize(request.prompt)
+        if not request.prompt:
+            raise ValueError("提示词不能为空")
+            
+        optimizer = PromptOptimizer(vector_store=vector_store)
+        optimized_prompt = await optimizer.optimize(request.prompt)
         logger.info("Prompt优化成功")
         
         return {
             "status": "success",
-            "optimized_prompt": optimized
+            "optimized_prompt": optimized_prompt
         }
         
     except Exception as e:
@@ -184,6 +190,82 @@ async def upload_context(
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
+@app.post("/api/confirm-template")
+async def confirm_template(request: ConfirmTemplateRequest) -> Dict[str, Any]:
+    """确认并保存模板到向量数据库
+    
+    Args:
+        request: 请求体，包含确认的模板内容
+        
+    Returns:
+        Dict[str, Any]: 保存结果
+    """
+    try:
+        logger.info("开始保存模板到向量数据库...")
+        
+        # 验证模板格式
+        template_generator = TemplateGenerator()
+        is_valid, missing_fields = template_generator.validate_template(request.template)
+        
+        if not is_valid:
+            raise ValueError(f"模板格式无效，缺少以下字段：{', '.join(missing_fields)}")
+        
+        # 保存到向量数据库
+        vector_store.add_template(request.template)
+        
+        # 验证保存是否成功
+        if not vector_store.verify_insertion(request.template, "templates"):
+            raise ValueError("模板保存验证失败")
+            
+        logger.info("模板保存成功")
+        return {
+            "status": "success",
+            "message": "模板已成功保存到向量数据库"
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"保存模板失败: {error_msg}")
+        if DEBUG:
+            logger.debug("详细错误信息:", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.post("/api/confirm-prompt")
+async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
+    """确认并保存优化后的prompt到向量数据库
+    
+    Args:
+        request: 请求体，包含确认的优化后prompt内容
+        
+    Returns:
+        Dict[str, Any]: 保存结果
+    """
+    try:
+        logger.info("开始保存优化后的prompt到向量数据库...")
+        
+        if not request.optimized_prompt:
+            raise ValueError("优化后的prompt内容不能为空")
+        
+        # 保存到向量数据库
+        vector_store.add_template(request.optimized_prompt)
+        
+        # 验证保存是否成功
+        if not vector_store.verify_insertion(request.optimized_prompt, "templates"):
+            raise ValueError("优化后的prompt保存验证失败")
+            
+        logger.info("优化后的prompt保存成功")
+        return {
+            "status": "success",
+            "message": "优化后的prompt已成功保存到向量数据库"
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"保存优化后的prompt失败: {error_msg}")
+        if DEBUG:
+            logger.debug("详细错误信息:", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
+
 @app.get("/api/health")
 async def health_check():
     """健康检查API"""
@@ -195,6 +277,27 @@ async def health_check():
         }
     except Exception as e:
         logger.error(f"健康检查失败: {str(e)}")
+        if DEBUG:
+            logger.debug("详细错误信息:", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/vector-db-status")
+async def get_vector_db_status() -> Dict[str, Any]:
+    """获取向量数据库状态的API
+    
+    Returns:
+        Dict[str, Any]: 状态信息
+    """
+    try:
+        is_ready = vector_store.is_initialized()
+        error = vector_store.get_initialization_error() if not is_ready else None
+        
+        return {
+            "status": "ready" if is_ready else "initializing",
+            "error": error
+        }
+    except Exception as e:
+        logger.error(f"获取向量数据库状态失败: {str(e)}")
         if DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

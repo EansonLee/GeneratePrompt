@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain_community.tools import Tool
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -14,7 +14,8 @@ from config.config import (
     SEARCH_CONFIG,
     PROMPT_OPTIMIZATION_TEMPERATURE,
     PROMPT_OPTIMIZATION_MAX_TOKENS,
-    PROMPT_OPTIMIZATION_SYSTEM_PROMPT
+    PROMPT_OPTIMIZATION_SYSTEM_PROMPT,
+    OPENAI_BASE_URL
 )
 from src.utils.vector_store import VectorStore
 from src.agents.prompt_optimization_agent import PromptOptimizationAgent
@@ -24,49 +25,29 @@ logger = logging.getLogger(__name__)
 class PromptOptimizer:
     """提示词优化器"""
 
-    def __init__(
-            self,
-            model_name: str = OPENAI_MODEL,
-            use_mock: bool = False,
-            temperature: float = PROMPT_OPTIMIZATION_TEMPERATURE,
-            max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS,
-            vector_store: Optional[VectorStore] = None
-        ):
+    def __init__(self, vector_store: Optional[VectorStore] = None):
         """初始化优化器
-
-        Args:
-            model_name: 模型名称
-            use_mock: 是否使用mock数据
-            temperature: 温度参数
-            max_tokens: 最大token数
-            vector_store: 向量存储实例
-        """
-        self.model_name = model_name
-        self.temperature = temperature
-        self.max_tokens = max_tokens
         
-        # 使用传入的向量存储实例，如果没有传入则创建新实例
-        if vector_store:
-            self.vector_store = vector_store
-        else:
-            try:
-                logger.info("创建新的向量存储实例...")
-                self.vector_store = VectorStore(use_mock=False)  # 强制使用真实数据
-                logger.info("向量存储实例创建成功")
-            except Exception as e:
-                logger.error(f"创建向量存储实例失败: {str(e)}")
-                if use_mock:
-                    logger.warning("回退到mock模式")
-                    self.vector_store = VectorStore(use_mock=True)
-                else:
-                    raise
-                    
-        self.agent = PromptOptimizationAgent(
-            vector_store=self.vector_store,
-            is_testing=use_mock,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        Args:
+            vector_store: 向量存储实例，如果不传入则使用全局实例
+        """
+        try:
+            # 使用传入的向量存储实例或获取全局实例
+            self.vector_store = vector_store or VectorStore()
+            logger.info("使用现有向量存储实例")
+            
+            # 初始化优化代理
+            self.agent = PromptOptimizationAgent(
+                vector_store=self.vector_store,
+                is_testing=False,
+                temperature=PROMPT_OPTIMIZATION_TEMPERATURE,
+                max_tokens=PROMPT_OPTIMIZATION_MAX_TOKENS
+            )
+            logger.info("优化代理初始化成功")
+            
+        except Exception as e:
+            logger.error(f"初始化优化器失败: {str(e)}")
+            raise
 
     async def optimize(self, prompt: str) -> str:
         """优化提示词
@@ -78,9 +59,10 @@ class PromptOptimizer:
             str: 优化后的提示词
         """
         if not prompt:
-            raise Exception("提示词不能为空")
+            raise ValueError("提示词不能为空")
 
         try:
+            # 使用代理优化提示词
             result = await self.agent.optimize_prompt(prompt)
             if isinstance(result, dict):
                 return result.get("optimized_prompt", "")

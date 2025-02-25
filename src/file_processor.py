@@ -17,6 +17,25 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+def find_7zip_path() -> str:
+    """查找7-Zip可执行文件的路径"""
+    possible_paths = [
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+        r"C:\Users\Administrator\AppData\Local\Programs\7-Zip\7z.exe",
+        r"C:\Users\Administrator\scoop\apps\7zip\current\7z.exe",
+    ]
+    
+    # 检查环境变量中的路径
+    if '7ZIP_PATH' in os.environ:
+        possible_paths.insert(0, os.environ['7ZIP_PATH'])
+        
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+            
+    raise FileNotFoundError("找不到7-Zip可执行文件，请确保已正确安装7-Zip")
+
 class FileProcessor:
     """文件处理器类"""
     
@@ -71,6 +90,15 @@ class FileProcessor:
         # 确保目录存在
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 查找7-Zip路径
+        try:
+            self.seven_zip_path = find_7zip_path()
+            logger.info(f"找到7-Zip路径: {self.seven_zip_path}")
+        except FileNotFoundError as e:
+            logger.warning(f"7-Zip未找到: {str(e)}")
+            self.seven_zip_path = None
+            
         logger.info(f"文件处理器初始化完成，上传目录: {self.upload_dir}")
 
     def is_supported_file(self, filename: str) -> bool:
@@ -95,7 +123,10 @@ class FileProcessor:
             str: 文件类型
         """
         ext = Path(filename).suffix.lower()
-        return self.SUPPORTED_EXTENSIONS.get(ext, 'unknown')
+        # 直接使用扩展名判断，不再依赖外部工具
+        if ext in self.SUPPORTED_EXTENSIONS:
+            return self.SUPPORTED_EXTENSIONS[ext]
+        return 'unknown'
 
     async def process_file(self, file_path: Path, is_directory: bool = False) -> Dict[str, Any]:
         """处理上传的文件
@@ -486,7 +517,27 @@ class FileProcessor:
                     with py7zr.SevenZipFile(archive_path, 'r') as sz:
                         sz.extractall(extract_dir)
                 elif ext == '.rar':
-                    patoolib.extract_archive(str(archive_path), outdir=str(extract_dir))
+                    try:
+                        if self.seven_zip_path:
+                            # 尝试使用7z解压RAR文件
+                            import subprocess
+                            logger.info(f"使用7-Zip解压: {self.seven_zip_path}")
+                            result = subprocess.run(
+                                [self.seven_zip_path, 'x', str(archive_path), f'-o{str(extract_dir)}'],
+                                capture_output=True,
+                                text=True
+                            )
+                            if result.returncode != 0:
+                                # 如果7z失败，尝试使用patool
+                                logger.warning(f"使用7z解压失败: {result.stderr}")
+                                logger.info("尝试使用patool解压...")
+                                patoolib.extract_archive(str(archive_path), outdir=str(extract_dir), interactive=False)
+                        else:
+                            # 直接使用patool
+                            logger.info("未找到7-Zip，使用patool解压...")
+                            patoolib.extract_archive(str(archive_path), outdir=str(extract_dir), interactive=False)
+                    except Exception as e:
+                        raise Exception(f"解压失败: {str(e)}")
                 else:
                     raise ValueError(f"暂不支持的压缩格式: {ext}")
                     
