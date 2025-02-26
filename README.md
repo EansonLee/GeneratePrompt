@@ -64,6 +64,13 @@ cp .env.example .env
 ```bash
 cd src/api
 $env:PYTHONPATH = "."
+
+# 添加7zip安装命令
+winget install 7zip.7zip // 安装7zip-windows
+
+# 添加7zip安装命令
+sudo apt-get update
+sudo apt-get install p7zip-full p7zip-rar # 安装7zip-linux
 python -m uvicorn src.api.main:app --reload
 ```
 
