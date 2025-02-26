@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 def find_7zip_path() -> str:
     """查找7-Zip可执行文件的路径，支持Windows和Linux系统"""
     # 检查环境变量中的路径
-    if '7ZIP_PATH' in os.environ:
-        path = os.environ['7ZIP_PATH']
+    if 'SEVENZIP_PATH' in os.environ:
+        path = os.environ['SEVENZIP_PATH']
         if os.path.exists(path):
             return path
     
