@@ -18,23 +18,36 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 def find_7zip_path() -> str:
-    """查找7-Zip可执行文件的路径"""
-    possible_paths = [
-        r"C:\Program Files\7-Zip\7z.exe",
-        r"C:\Program Files (x86)\7-Zip\7z.exe",
-        r"C:\Users\Administrator\AppData\Local\Programs\7-Zip\7z.exe",
-        r"C:\Users\Administrator\scoop\apps\7zip\current\7z.exe",
-    ]
-    
+    """查找7-Zip可执行文件的路径，支持Windows和Linux系统"""
     # 检查环境变量中的路径
     if '7ZIP_PATH' in os.environ:
-        possible_paths.insert(0, os.environ['7ZIP_PATH'])
-        
+        path = os.environ['7ZIP_PATH']
+        if os.path.exists(path):
+            return path
+    
+    # 根据操作系统选择可能的路径
+    if os.name == 'nt':  # Windows系统
+        possible_paths = [
+            r"C:\Program Files\7-Zip\7z.exe",
+            r"C:\Program Files (x86)\7-Zip\7z.exe",
+            r"C:\Users\Administrator\AppData\Local\Programs\7-Zip\7z.exe",
+            r"C:\Users\Administrator\scoop\apps\7zip\current\7z.exe",
+        ]
+    else:  # Linux/Unix系统
+        possible_paths = [
+            "/usr/bin/7z",
+            "/usr/local/bin/7z",
+            "/usr/bin/7za",
+            "/usr/local/bin/7za"
+        ]
+    
     for path in possible_paths:
         if os.path.exists(path):
             return path
             
-    raise FileNotFoundError("找不到7-Zip可执行文件，请确保已正确安装7-Zip")
+    raise FileNotFoundError("找不到7-Zip可执行文件，请确保已正确安装7-Zip。\n" +
+                          "Windows用户请使用: winget install 7zip.7zip\n" +
+                          "Linux用户请使用: sudo apt-get install p7zip-full p7zip-rar")
 
 class FileProcessor:
     """文件处理器类"""
