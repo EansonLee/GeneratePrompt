@@ -4,29 +4,26 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
 import os
+import logging
+import sys
 from pathlib import Path
-from src.prompt_optimizer import PromptOptimizer
+
+# 添加项目根目录到Python路径
+project_root = str(Path(__file__).resolve().parent.parent.parent)
+sys.path.append(project_root)
+
 from src.template_generator import TemplateGenerator
 from src.utils.vector_store import VectorStore
 from src.file_processor import FileProcessor
-from config.config import (
-    DEBUG,
-    LOG_LEVEL,
-    BASE_DIR,
-    AGENT_CONFIG,
-    TEMPLATE_GENERATION_CONFIG,
-    PROMPT_OPTIMIZATION_TEMPERATURE,
-    PROMPT_OPTIMIZATION_MAX_TOKENS,
-    OPENAI_MODEL
-)
+from src.prompt_optimizer import PromptOptimizer
+from config.config import settings
 
 # 配置日志级别
-import logging
-logging.basicConfig(level=LOG_LEVEL)
+logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 # 创建上传目录
-UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR = settings.UPLOAD_DIR
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # 初始化全局向量存储
@@ -36,24 +33,24 @@ try:
     logger.info("全局向量存储初始化成功")
 except Exception as e:
     logger.error(f"全局向量存储初始化失败: {str(e)}")
-    if DEBUG:
+    if settings.DEBUG:
         logger.debug("详细错误信息:", exc_info=True)
     logger.info("使用mock数据初始化向量存储...")
     vector_store = VectorStore(use_mock=True)
 
 app = FastAPI(
-    title="Prompt生成优化API",
-    description="提供Prompt模板生成和优化的API服务",
-    version="1.0.0"
+    title=settings.API_CONFIG["title"],
+    description=settings.API_CONFIG["description"],
+    version=settings.API_CONFIG["version"]
 )
 
 # 配置CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应该设置具体的源
+    allow_origins=settings.API_CONFIG["cors_origins"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=settings.API_CONFIG["cors_methods"],
+    allow_headers=settings.API_CONFIG["cors_headers"],
 )
 
 # 初始化文件处理器
@@ -100,7 +97,7 @@ async def generate_template(request: TemplateRequest) -> Dict[str, Any]:
     except Exception as e:
         error_msg = str(e)
         logger.error(f"生成模板失败: {error_msg}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
@@ -132,7 +129,7 @@ async def optimize_prompt(request: PromptRequest) -> Dict[str, Any]:
     except Exception as e:
         error_msg = str(e)
         logger.error(f"优化prompt失败: {error_msg}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
@@ -186,7 +183,7 @@ async def upload_context(
     except Exception as e:
         error_msg = str(e)
         logger.error(f"处理上传文件失败: {error_msg}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
@@ -226,7 +223,7 @@ async def confirm_template(request: ConfirmTemplateRequest) -> Dict[str, Any]:
     except Exception as e:
         error_msg = str(e)
         logger.error(f"保存模板失败: {error_msg}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
@@ -262,7 +259,7 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
     except Exception as e:
         error_msg = str(e)
         logger.error(f"保存优化后的prompt失败: {error_msg}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
@@ -272,12 +269,12 @@ async def health_check():
     try:
         return {
             "status": "healthy",
-            "debug_mode": DEBUG,
-            "log_level": LOG_LEVEL
+            "debug_mode": settings.DEBUG,
+            "log_level": settings.LOG_LEVEL
         }
     except Exception as e:
         logger.error(f"健康检查失败: {str(e)}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -298,9 +295,9 @@ async def get_vector_db_status() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"获取向量数据库状态失败: {str(e)}")
-        if DEBUG:
+        if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=DEBUG) 
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=settings.DEBUG) 

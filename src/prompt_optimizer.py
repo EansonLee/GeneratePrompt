@@ -6,19 +6,8 @@ from langchain_openai import ChatOpenAI
 from langchain_community.tools import Tool
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from config.config import (
-    OPENAI_API_KEY,
-    OPENAI_MODEL,
-    SYSTEM_TEMPLATE,
-    AGENT_CONFIG,
-    SEARCH_CONFIG,
-    PROMPT_OPTIMIZATION_TEMPERATURE,
-    PROMPT_OPTIMIZATION_MAX_TOKENS,
-    PROMPT_OPTIMIZATION_SYSTEM_PROMPT,
-    OPENAI_BASE_URL
-)
+from config.config import settings
 from src.utils.vector_store import VectorStore
-from src.agents.prompt_optimization_agent import PromptOptimizationAgent
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +25,15 @@ class PromptOptimizer:
             self.vector_store = vector_store or VectorStore()
             logger.info("使用现有向量存储实例")
             
+            # 延迟导入以避免循环依赖
+            from src.agents.prompt_optimization_agent import PromptOptimizationAgent
+            
             # 初始化优化代理
             self.agent = PromptOptimizationAgent(
                 vector_store=self.vector_store,
-                is_testing=False,
-                temperature=PROMPT_OPTIMIZATION_TEMPERATURE,
-                max_tokens=PROMPT_OPTIMIZATION_MAX_TOKENS
+                is_testing=settings.TESTING,
+                temperature=settings.PROMPT_OPTIMIZATION_CONFIG["temperature"],
+                max_tokens=settings.PROMPT_OPTIMIZATION_CONFIG["max_tokens"]
             )
             logger.info("优化代理初始化成功")
             

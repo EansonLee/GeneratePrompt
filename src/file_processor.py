@@ -4,7 +4,7 @@ import shutil
 import py7zr
 import patoolib
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 from src.utils.vector_store import VectorStore
 from langchain_community.document_loaders import (

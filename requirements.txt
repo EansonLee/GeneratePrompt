@@ -1,41 +1,59 @@
+# LangChain Dependencies
 langchain>=0.1.0
 langchain-openai>=0.0.8
 langchain-community>=0.0.28
 langchain-core>=0.1.31
-langgraph>=0.0.20
+langgraph>=0.2.74
 openai>=1.14.2
+
+# Vector Store Dependencies
 chromadb>=0.4.22
 faiss-cpu>=1.7.4
+
+# Data Processing Dependencies
 numpy>=1.26.4
 pandas>=2.2.1
 pydantic>=2.6.4
 typing-extensions>=4.10.0
+
+# Web Service Dependencies
 fastapi>=0.110.0
 uvicorn>=0.27.1
 python-jose>=3.3.0
 cryptography>=42.0.5
 requests>=2.31.0
 aiohttp>=3.9.3
+
+# Tools and Utilities
 python-dotenv>=1.0.1
 tiktoken>=0.9.0
 tqdm>=4.66.2
+
+# Testing Dependencies
 pytest>=8.1.1
 pytest-asyncio>=0.23.5
 pytest-cov>=4.1.0
 pytest-mock>=3.12.0
+
+# Code Quality Tools
 mypy>=1.9.0
 black>=24.2.0
 isort>=5.13.2
 flake8>=7.0.0
 
-# 文件处理相关依赖
+# File Processing Dependencies
 python-multipart>=0.0.9
 py7zr>=0.20.8
 patool>=2.0.0
 unrar>=0.4
+rarfile>=4.0
 
-# 文本处理相关依赖
+# Text Processing Dependencies
 langchain-text-splitters>=0.0.1
 unstructured>=0.10.30
 markdown>=3.5.2
 PyYAML>=6.0.1
+
+# Additional Tools
+httpx>=0.27.0
+watchfiles>=0.21.0

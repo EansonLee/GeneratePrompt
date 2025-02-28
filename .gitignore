@@ -1,3 +1,8 @@
+# 环境变量配置
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -20,6 +25,32 @@ wheels/
 .installed.cfg
 *.egg
 
+# 日志文件
+logs/
+*.log
+
+# 向量数据库
+data/vector_store/
+
+# 上传文件
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 测试
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+
 # 虚拟环境
 venv/
 env/
@@ -28,13 +59,6 @@ ENV/
 .env.example
 .venv
 langchain_env/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
 
 # 项目特定
 data/
@@ -50,11 +74,6 @@ data/
 vector_store/
 *.faiss
 *.pkl
-
-# 测试
-.pytest_cache/
-.coverage
-htmlcov/
 
 # 其他
 *.bak

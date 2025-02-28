@@ -6,31 +6,25 @@ from unittest.mock import Mock, MagicMock
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
-from config.config import (
-    OPENAI_API_KEY, 
-    OPENAI_BASE_URL, 
-    EMBEDDING_MODEL,
-    VECTOR_STORE_CONFIG,
-    CHUNK_SIZE,
-    CHUNK_OVERLAP,
-    LOG_LEVEL,
-    DEBUG
-)
+from config.config import settings
 import numpy as np
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import requests
 import json
 from pathlib import Path
+import time
+import asyncio
 
 # 设置日志级别
 logger = logging.getLogger(__name__)
-logger.setLevel(LOG_LEVEL)
+logger.setLevel(settings.LOG_LEVEL)
 
 class VectorStore:
     """向量数据库管理类"""
     
     _instance = None  # 单例实例
     _is_initialized = False  # 初始化标志
+    _initialization_error = None  # 初始化错误信息
     
     def __new__(cls, use_mock: bool = False):
         """单例模式实现"""
@@ -44,49 +38,50 @@ class VectorStore:
         Args:
             use_mock: 是否使用mock数据
         """
-        # 如果已经初始化过，直接返回
+        # 避免重复初始化
         if self._is_initialized:
             return
             
-        self.is_testing = os.getenv("TESTING", "False").lower() == "true"
+        self.is_testing = settings.TESTING
         self.is_ready = False
-        self.initialization_error = None
         
         # 打印配置信息
         logger.info("==================== 当前配置信息 ====================")
-        logger.info(f"配置文件中的 API Key: {OPENAI_API_KEY}")
-        logger.info(f"配置文件中的 Base URL: {OPENAI_BASE_URL}")
-        logger.info(f"配置文件中的 Embedding Model: {EMBEDDING_MODEL}")
-        logger.info(f"调试模式: {DEBUG}")
+        logger.info(f"配置文件中的 API Key: {settings.OPENAI_API_KEY}")
+        logger.info(f"配置文件中的 Base URL: {settings.OPENAI_BASE_URL}")
+        logger.info(f"配置文件中的 Embedding Model: {settings.EMBEDDING_MODEL}")
+        logger.info(f"调试模式: {settings.DEBUG}")
         logger.info("====================================================")
         
         # 初始化文本分割器
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
+            chunk_size=settings.VECTOR_STORE_CONFIG["chunk_size"],
+            chunk_overlap=settings.VECTOR_STORE_CONFIG["chunk_overlap"],
             length_function=len,
-            separators=VECTOR_STORE_CONFIG["SEPARATORS"]
+            separators=settings.VECTOR_STORE_CONFIG["separators"]
         )
         logger.info("文本分割器初始化完成")
         
-        # 强制使用真实API
         try:
-            self._init_real_api()
+            if use_mock:
+                self._init_mock_data()
+            else:
+                self._init_real_api()
             self.is_ready = True
+            self._is_initialized = True
+            self._initialization_error = None
         except Exception as e:
-            logger.error(f"真实API初始化失败: {str(e)}")
-            self.initialization_error = str(e)
-            if DEBUG:
+            self._initialization_error = str(e)
+            logger.error(f"向量数据库初始化失败: {str(e)}")
+            if settings.DEBUG:
                 logger.debug("详细错误信息:", exc_info=True)
             if use_mock or self.is_testing:
                 logger.warning("回退到mock模式")
-                self._init_mock_data()
                 self.is_ready = True
             else:
                 raise
         
         self.prompt_history = []
-        self._is_initialized = True
     
     def is_initialized(self) -> bool:
         """检查向量数据库是否已初始化完成
@@ -102,7 +97,7 @@ class VectorStore:
         Returns:
             str: 错误信息
         """
-        return self.initialization_error
+        return self._initialization_error
 
     async def wait_until_ready(self, timeout: int = 30) -> bool:
         """等待向量数据库就绪
@@ -113,34 +108,33 @@ class VectorStore:
         Returns:
             bool: 是否就绪
         """
-        import asyncio
-        start_time = asyncio.get_event_loop().time()
-        while not self.is_ready:
-            if asyncio.get_event_loop().time() - start_time > timeout:
-                return False
+        start_time = time.time()
+        while not self.is_ready and time.time() - start_time < timeout:
             await asyncio.sleep(1)
-        return True
+            if self._initialization_error:
+                return False
+        return self.is_ready
 
     def _init_real_api(self):
         """初始化真实API"""
         try:
             logger.info("初始化向量数据库...")
-            logger.info(f"使用的 API Base URL: {OPENAI_BASE_URL}")
-            logger.info(f"使用的 Embedding Model: text-embedding-ada-002")
+            logger.info(f"使用的 API Base URL: {settings.OPENAI_BASE_URL}")
+            logger.info(f"使用的 Embedding Model: {settings.EMBEDDING_MODEL}")
             
             # 验证API配置
-            if not OPENAI_API_KEY:
+            if not settings.OPENAI_API_KEY:
                 raise ValueError("未设置 OPENAI_API_KEY")
                 
-            if not OPENAI_BASE_URL:
+            if not settings.OPENAI_BASE_URL:
                 raise ValueError("未设置 OPENAI_BASE_URL")
             
             self.embeddings = OpenAIEmbeddings(
-                model=EMBEDDING_MODEL,
-                openai_api_key=OPENAI_API_KEY,
-                openai_api_base=OPENAI_BASE_URL,
+                model=settings.EMBEDDING_MODEL,
+                openai_api_key=settings.OPENAI_API_KEY,
+                openai_api_base=settings.OPENAI_BASE_URL,
                 headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                     "User-Agent": "OpenAI/v1 PythonClient/1.0.0"
@@ -163,7 +157,7 @@ class VectorStore:
             
         except Exception as e:
             logger.error(f"向量数据库初始化失败: {str(e)}")
-            if DEBUG:
+            if settings.DEBUG:
                 logger.debug(f"详细错误信息: {str(e)}", exc_info=True)
             raise
     
@@ -529,7 +523,7 @@ class VectorStore:
         logger.info("初始化向量存储...")
         
         # 确保向量存储目录存在
-        vector_store_path = Path(VECTOR_STORE_CONFIG["persist_directory"])
+        vector_store_path = Path(settings.VECTOR_STORE_CONFIG["persist_directory"])
         vector_store_path.mkdir(parents=True, exist_ok=True)
         
         contexts_path = vector_store_path / "contexts"

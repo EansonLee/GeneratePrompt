@@ -1,171 +1,201 @@
 # Prompt生成优化系统
 
-一个基于AI的提示词生成和优化系统，支持多种文件格式的上下文处理和向量化存储。
+## 项目简介
+这是一个基于FastAPI和LangChain的Prompt生成优化系统，提供模板生成和提示词优化功能。
 
-## 功能特点
+## 环境要求
 
-- 🤖 基于OpenAI的提示词优化
-- 📝 提示词模板生成
-- 📁 多种文件格式支持
-- 💾 向量化存储上下文
-- 🌐 React + FastAPI全栈应用
-- 🔄 实时优化反馈
-
-### 支持的文件类型
-
-- 文本文件：`.txt`, `.md`, `.markdown`
-- 代码文件：`.py`, `.js`, `.jsx`, `.ts`, `.tsx`
-- 配置文件：`.json`, `.yaml`, `.yml`
-- 压缩文件：`.zip`, `.rar`, `.7z`
+- Python 3.9+ ([Python官网](https://www.python.org/downloads/))
+- Node.js 16+ ([Node.js官网](https://nodejs.org/))
+- Git (可选，[Git官网](https://git-scm.com/downloads))
 
 ## 快速开始
 
-### 环境要求
+### Windows用户
 
-- Python 3.9+
-- Node.js 16+
-- OpenAI API密钥
+1. 配置OpenAI API密钥：
+   在项目根目录创建 `.env` 文件，添加：
+   ```
+   OPENAI_API_KEY=你的OpenAI API密钥
+   ```
 
-### 安装步骤
+2. 启动方式：
 
-1. 克隆项目
-```bash
-git clone <repository-url>
-cd prompt-generator
-```
+   方式一：使用批处理文件（推荐）
+   ```bash
+   # 直接双击 start.bat 文件
+   # 或在命令提示符中运行：
+   start.bat
+   ```
 
-2. 安装Python依赖
-```bash
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# 或
-.\venv\Scripts\activate  # Windows
+   方式二：手动运行
+   ```bash
+   # 1. 打开命令提示符(cmd)或PowerShell
+   # 2. 进入项目目录
+   cd 项目目录路径
 
-# 安装依赖
-pip install -r requirements.txt
-```
+   # 3. 创建并激活虚拟环境
+   python -m venv venv
+   .\venv\Scripts\activate
 
-3. 安装前端依赖
-```bash
-cd frontend
-npm install
-```
+   # 4. 安装Python依赖
+   pip install -r requirements.txt
 
-4. 配置环境变量
-```bash
-cp .env.example .env
-# 编辑.env文件，设置您的OpenAI API密钥和其他配置
-```
+   # 5. 安装前端依赖
+   cd frontend
+   npm install
+   cd ..
 
-### 启动服务
+   # 6. 运行启动脚本
+   python scripts/start.py
+   ```
 
-1. 启动后端服务
-```bash
-cd src/api
-$env:PYTHONPATH = "."
-
-# 添加7zip安装命令
-winget install 7zip.7zip // 安装7zip-windows
-
-# 添加7zip安装命令
-sudo apt-get update
-sudo apt-get install p7zip-full p7zip-rar # 安装7zip-linux
-python -m uvicorn src.api.main:app --reload
-```
-
-2. 启动前端服务
-```bash
-cd frontend
-npm start
-```
-
-访问 http://localhost:3000 即可使用系统。
-
-## 项目结构
-
-```
-prompt-generator/
-├── src/
-│   ├── api/              # FastAPI后端
-│   │   ├── agents/
-│   │   │   ├── template_generation_agent.py
-│   │   │   └── prompt_optimization_agent.py
-│   │   ├── utils/
-│   │   │   └── vector_store.py
-│   │   ├── template_generator.py
-│   │   └── prompt_optimizer.py
-│   ├── frontend/            # React前端
-│   ├── tests/              # 测试文件
-│   ├── data/               # 数据文件
-│   └── docs/              # 文档
-├── config/
-│   └── config.py
-└── README.md
-```
-
-## API文档
-
-启动后端服务后，访问 http://localhost:8000/docs 查看API文档。
-
-### 主要接口
-
-- `POST /api/generate-template`: 生成提示词模板
-- `POST /api/optimize-prompt`: 优化提示词
-- `POST /api/upload-context`: 上传上下文文件
-
-## 开发指南
-
-### 代码规范
-
-项目使用以下工具确保代码质量：
-- Black: 代码格式化
-- isort: 导入语句排序
-- mypy: 类型检查
-- flake8: 代码风格检查
-
-运行代码检查：
-```bash
-# 格式化代码
-black src tests
-isort src tests
-
-# 类型检查
-mypy src
-
-# 代码风格检查
-flake8 src tests
-```
-
-### 运行测试
+### Linux/Mac用户
 
 ```bash
-pytest
+# 1. 添加执行权限
+chmod +x start.sh
+
+# 2. 运行启动脚本
+./start.sh
 ```
 
 ## 配置说明
 
-主要配置项（在.env文件中设置）：
+### 配置文件
+- 默认配置已内置在系统中
+- 创建 `.env` 文件可覆盖默认配置
+- 必须配置 `OPENAI_API_KEY`
 
-- `OPENAI_API_KEY`: OpenAI API密钥
-- `OPENAI_MODEL`: 使用的模型（默认：gpt-3.5-turbo）
-- `EMBEDDING_MODEL`: 嵌入模型
-- `MAX_FILE_SIZE`: 最大文件大小限制
-- `CHUNK_SIZE`: 文本分块大小
-- `CHUNK_OVERLAP`: 分块重叠大小
+### 配置检查
+系统包含两个主要脚本：
 
-## 贡献指南
+1. `check_config.py`: 配置检查脚本
+   - 检查环境变量设置
+   - 验证必要目录
+   - 测试OpenAI API连接
 
-1. Fork项目
-2. 创建特性分支
-3. 提交更改
-4. 推送到分支
-5. 创建Pull Request
+2. `start.py`: 启动脚本
+   - 设置环境变量
+   - 调用配置检查
+   - 启动后端和前端服务
 
-## 许可证
+### 执行时机
 
-[MIT License](LICENSE)
+```bash
+# 场景1：首次运行或日常使用
+start.bat  # Windows
+./start.sh  # Linux/Mac
 
-## 联系方式
+# 场景2：配置排查
+python scripts/check_config.py  # 仅检查配置
 
-如有问题或建议，请提交Issue或联系项目维护者。 
+# 场景3：开发调试
+python scripts/start.py  # 直接启动服务
+```
+
+## 常见问题解决
+
+### Windows相关
+
+1. 权限问题
+```bash
+# 以管理员身份运行PowerShell并执行：
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+2. 端口占用
+```bash
+# 查找占用端口的进程
+netstat -ano | findstr :8000  # 后端端口
+netstat -ano | findstr :3000  # 前端端口
+
+# 结束进程
+taskkill /F /PID 进程ID
+```
+
+### Linux/Mac相关
+
+```bash
+# 端口占用处理
+lsof -i :8000  # 检查后端端口
+lsof -i :3000  # 检查前端端口
+kill $(lsof -t -i:8000)  # 结束后端进程
+kill $(lsof -t -i:3000)  # 结束前端进程
+```
+
+## 项目结构
+
+```
+项目根目录
+├── frontend/          # 前端代码
+├── src/              # 后端源码
+│   ├── agents/       # 代理实现
+│   ├── api/          # API实现
+│   └── utils/        # 工具函数
+├── scripts/          # 脚本目录
+│   ├── check_config.py  # 配置检查脚本
+│   └── start.py        # 启动脚本
+├── data/             # 数据目录（自动创建）
+├── logs/             # 日志目录（自动创建）
+├── uploads/          # 上传文件目录（自动创建）
+├── start.bat         # Windows启动脚本
+├── start.sh          # Linux/Mac启动脚本
+└── .env              # 环境配置文件（需要创建）
+```
+
+## 开发指南
+
+### 1. 配置管理
+- 修改配置后建议先运行 `check_config.py` 验证
+- 开发新功能时先确保配置正确
+- 可以在 `.env` 中覆盖任何默认配置
+
+### 2. 启动服务
+```bash
+# 完整启动（推荐）
+start.bat  # Windows
+./start.sh  # Linux/Mac
+
+# 分步启动（调试用）
+python scripts/check_config.py  # 检查配置
+python scripts/start.py        # 启动服务
+```
+
+### 3. API文档
+启动服务后访问：
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+- 前端页面: http://localhost:3000
+
+## 注意事项
+
+1. 确保Python和Node.js已添加到系统环境变量
+2. 如果使用代理，在 `.env` 中设置 `OPENAI_BASE_URL`
+3. 首次运行可能需要等待依赖安装
+4. 不要提交 `.env` 文件到版本控制系统
+5. 定期备份数据目录
+
+## 调试提示
+
+1. 检查配置：
+```bash
+python scripts/check_config.py
+```
+
+2. 查看日志：
+- 检查 `logs` 目录下的日志文件
+- 查看命令行输出的错误信息
+
+3. 单独启动服务：
+```bash
+# 前端
+cd frontend
+npm start
+
+# 后端
+cd src/api
+uvicorn main:app --reload
+```
+
+如果遇到问题，系统会提供详细的错误信息和解决建议。 

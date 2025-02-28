@@ -1,27 +1,14 @@
 import logging
-from typing import Dict, Any, List, TypedDict, Annotated
-from langchain_community.chat_models import ChatOpenAI
+from typing import Dict, Any, List, TypedDict, Annotated, Optional
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
-from langchain_community.tools import Tool
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnablePassthrough, Runnable
 from src.utils.vector_store import VectorStore
-from config.config import (
-    OPENAI_API_KEY,
-    OPENAI_MODEL,
-    OPENAI_BASE_URL,
-    SYSTEM_TEMPLATE,
-    AGENT_CONFIG,
-    SEARCH_CONFIG,
-    PROMPT_OPTIMIZATION_TEMPERATURE,
-    PROMPT_OPTIMIZATION_MAX_TOKENS,
-    PROMPT_OPTIMIZATION_SYSTEM_PROMPT
-)
+from config.config import settings
 from pydantic import BaseModel, Field
 from unittest.mock import Mock, MagicMock
 import os
-from langchain_core.runnables import RunnablePassthrough, Runnable
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -85,29 +72,42 @@ class MockLLM(Runnable):
         return [self.invoke(input) for input in inputs]
 
 class PromptOptimizationAgent:
-    """提示词优化Agent"""
+    """Prompt优化Agent"""
     
     def __init__(
-            self,
-            vector_store: VectorStore,
-            is_testing: bool = False,
-            temperature: float = PROMPT_OPTIMIZATION_TEMPERATURE,
-            max_tokens: int = PROMPT_OPTIMIZATION_MAX_TOKENS
-        ):
-        self.vector_store = vector_store
+        self,
+        vector_store: Optional[VectorStore] = None,
+        is_testing: bool = False,
+        temperature: float = None,
+        max_tokens: int = None
+    ):
+        """初始化Agent
+        
+        Args:
+            vector_store: 向量存储实例
+            is_testing: 是否处于测试模式
+            temperature: 温度参数
+            max_tokens: 最大token数
+        """
+        self.vector_store = vector_store or VectorStore()
         self.is_testing = is_testing
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.optimization_history = []
+        
+        # 使用传入的参数或配置文件中的默认值
+        self.temperature = temperature or settings.PROMPT_OPTIMIZATION_CONFIG["temperature"]
+        self.max_tokens = max_tokens or settings.PROMPT_OPTIMIZATION_CONFIG["max_tokens"]
         
         # 初始化LLM
         self.llm = ChatOpenAI(
-            model_name=OPENAI_MODEL,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            api_key=OPENAI_API_KEY,
-            base_url=OPENAI_BASE_URL
+            model_name=settings.OPENAI_MODEL,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_BASE_URL
         )
+        
+        logger.info(f"Prompt优化Agent初始化完成，使用模型: {settings.OPENAI_MODEL}")
+        
+        self.optimization_history = []
         
     async def optimize_prompt(self, prompt: str) -> str:
         """优化提示词
@@ -123,7 +123,7 @@ class PromptOptimizationAgent:
             contexts = self.vector_store.search_contexts(limit=5)
             
             # 构建提示
-            system_prompt = PROMPT_OPTIMIZATION_SYSTEM_PROMPT
+            system_prompt = settings.PROMPT_OPTIMIZATION_SYSTEM_PROMPT
             user_prompt = f"""请根据以下信息优化提示词：
 
 原始提示词：
@@ -304,7 +304,7 @@ class PromptOptimizationAgent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.llm = ChatOpenAI(
-            model_name=OPENAI_MODEL,
+            model_name=settings.OPENAI_MODEL,
             temperature=temperature,
             max_tokens=max_tokens
         ) 

@@ -1,22 +1,19 @@
+"""模板生成器模块"""
+from typing import List, Dict, Any, Optional, Tuple
 import logging
-from typing import Dict, Any, List, Optional, Tuple
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from config.config import (
-    TEMPLATE_GENERATION_CONFIG,
-    OPENAI_MODEL,
-    OPENAI_API_KEY,
-    OPENAI_BASE_URL,
-    TEMPLATE_SYSTEM_PROMPT
-)
+from datetime import datetime
+from config.config import settings
 from src.utils.vector_store import VectorStore
 from src.agents.template_generation_agent import TemplateGenerationAgent
-from datetime import datetime
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
 
+# 设置日志级别
 logger = logging.getLogger(__name__)
+logger.setLevel(settings.LOG_LEVEL)
 
 class TemplateGenerator:
-    """模板生成器"""
+    """模板生成器类"""
     
     DEFAULT_TEMPLATE = """# Prompt模板
 
@@ -52,43 +49,14 @@ class TemplateGenerator:
         "组件设计"
     ]
 
-    def __init__(
-            self,
-            model_name: str = OPENAI_MODEL,
-            max_contexts: int = TEMPLATE_GENERATION_CONFIG["max_contexts"],
-            max_templates: int = TEMPLATE_GENERATION_CONFIG["max_templates"],
-            temperature: float = TEMPLATE_GENERATION_CONFIG["temperature"],
-            max_tokens: int = TEMPLATE_GENERATION_CONFIG["max_tokens"],
-            vector_store: Optional[VectorStore] = None
-        ):
-        """初始化生成器
-        
-        Args:
-            model_name: 模型名称
-            max_contexts: 最大上下文数量
-            max_templates: 最大模板数量
-            temperature: 温度参数
-            max_tokens: 最大token数
-            vector_store: 向量存储实例
-        """
-        try:
-            self.max_contexts = max_contexts
-            self.max_templates = max_templates
-            
-            self.llm = ChatOpenAI(
-                model_name=model_name,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                api_key=OPENAI_API_KEY,
-                base_url=OPENAI_BASE_URL
-            )
-        except Exception as e:
-            logger.error(f"初始化ChatOpenAI失败: {str(e)}")
-            self.llm = None
-            
-        # 使用传入的向量存储实例，如果没有传入则创建新实例
-        self.vector_store = vector_store or VectorStore()
-        self.agent = TemplateGenerationAgent()
+    def __init__(self):
+        """初始化模板生成器"""
+        self.vector_store = VectorStore()
+        self.agent = TemplateGenerationAgent(
+            vector_store=self.vector_store,
+            temperature=settings.TEMPLATE_GENERATION_CONFIG["temperature"],
+            max_tokens=settings.TEMPLATE_GENERATION_CONFIG["max_tokens"]
+        )
         
     def _get_context(self) -> Dict[str, Any]:
         """获取上下文信息
@@ -101,10 +69,10 @@ class TemplateGenerator:
         """
         try:
             contexts = self.vector_store.search_contexts(
-                limit=self.max_contexts
+                limit=settings.TEMPLATE_GENERATION_CONFIG["max_contexts"]
             )
             templates = self.vector_store.search_templates(
-                limit=self.max_templates
+                limit=settings.TEMPLATE_GENERATION_CONFIG["max_templates"]
             )
             
             if not contexts or not templates:
@@ -155,7 +123,7 @@ class TemplateGenerator:
             
             # 构建提示词
             messages = [
-                {"role": "system", "content": TEMPLATE_SYSTEM_PROMPT},
+                {"role": "system", "content": settings.TEMPLATE_SYSTEM_PROMPT},
                 {"role": "user", "content": f"""
 请根据以下信息生成项目模板：
 
@@ -167,7 +135,7 @@ class TemplateGenerator:
             ]
             
             # 调用语言模型
-            response = await self.llm.ainvoke(messages)
+            response = await self.agent.llm.ainvoke(messages)
             
             if not response or not response.content:
                 raise ValueError("模板生成失败：未获得有效响应")

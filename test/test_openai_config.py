@@ -1,6 +1,5 @@
-import os
 import unittest
-from dotenv import load_dotenv
+from config.config import settings
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -11,19 +10,16 @@ class TestOpenAIConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """测试前的设置"""
-        # 加载环境变量
-        load_dotenv()
-        cls.api_key = os.getenv("OPENAI_API_KEY")
-        cls.model = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
-        
-        # 设置环境变量
-        os.environ["OPENAI_API_KEY"] = cls.api_key
+        cls.api_key = settings.OPENAI_API_KEY
+        cls.model = settings.OPENAI_MODEL
+        cls.base_url = settings.OPENAI_BASE_URL
         print("\n开始运行OpenAI配置测试...")
 
     def test_api_key_exists(self):
         """测试API密钥是否存在"""
         self.assertIsNotNone(self.api_key, "OpenAI API密钥未设置")
         self.assertTrue(len(self.api_key) > 0, "OpenAI API密钥为空")
+        self.assertNotEqual(self.api_key, "your-api-key-here", "OpenAI API密钥使用了默认值")
         print(f"\nAPI密钥验证成功")
 
     def test_api_key_format(self):
@@ -36,7 +32,7 @@ class TestOpenAIConfig(unittest.TestCase):
         try:
             print("\n开始测试API调用...")
             
-            # 创建LangChain聊天模型，使用最简单的初始化方式
+            # 创建LangChain聊天模型
             chat = ChatOpenAI(
                 model_name=self.model,
                 openai_api_key=self.api_key,
