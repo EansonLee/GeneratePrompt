@@ -98,9 +98,11 @@ def start_backend():
         # 检查端口占用
         check_and_kill_port(8000)
         
+        # 使用当前Python解释器的完整路径
+        python_path = sys.executable
         backend_process = subprocess.Popen(
-            ["python", "-m", "uvicorn", "src.api.main:app", "--reload"],
-            cwd=project_root
+            [python_path, "-m", "uvicorn", "main:app", "--reload"],
+            cwd=project_root / "src" / "api"
         )
         print("[成功] 后端服务启动成功")
         return backend_process

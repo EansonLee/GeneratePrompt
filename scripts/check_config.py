@@ -162,6 +162,17 @@ def main():
     system = platform.system()
     print(f"\n[系统] 当前操作系统: {system}")
     
+    # 获取并打印配置信息
+    print("\n[配置] 当前系统配置信息:")
+    config = get_default_config()
+    for key, value in config.items():
+        # 对API密钥进行部分隐藏处理
+        if key == "OPENAI_API_KEY" and value:
+            masked_value = value[:4] + "*" * (len(value) - 8) + value[-4:] if len(value) > 8 else "***"
+            print(f"- {key}: {masked_value}")
+        else:
+            print(f"- {key}: {value}")
+    
     # 检查环境变量
     env_valid = check_env_variables()
     
