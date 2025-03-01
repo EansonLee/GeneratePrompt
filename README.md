@@ -7,6 +7,8 @@
 
 - Python 3.9+ ([Python官网](https://www.python.org/downloads/))
 - Node.js 16+ ([Node.js官网](https://nodejs.org/))
+- pip (Python包管理器)
+- npm (Node.js包管理器)
 - Git (可选，[Git官网](https://git-scm.com/downloads))
 
 ## 快速开始
@@ -26,6 +28,8 @@
    # 直接双击 start.bat 文件
    # 或在命令提示符中运行：
    start.bat
+   # 或在PowerShell中运行：
+   .\start.bat
    ```
 
    方式二：手动运行
@@ -52,13 +56,112 @@
 
 ### Linux/Mac用户
 
-```bash
-# 1. 添加执行权限
-chmod +x start.sh
+1. 添加执行权限并运行：
+   ```bash
+   # 方法1：使用bash直接执行
+   bash start.sh
+   
+   # 方法2：添加执行权限后运行
+   chmod +x start.sh
+   ./start.sh
+   ```
 
-# 2. 运行启动脚本
-./start.sh
-```
+2. 如果遇到行尾符问题（从Windows复制到Linux时）：
+   ```bash
+   # 安装dos2unix
+   sudo apt-get install dos2unix  # Ubuntu/Debian
+   sudo yum install dos2unix      # CentOS/RHEL
+   
+   # 修复行尾符
+   dos2unix start.sh
+   ```
+
+## 启动脚本说明
+
+### 脚本功能
+
+1. 环境检查：
+   - 检查Python和Node.js是否安装
+   - 验证必要的命令是否可用
+
+2. 虚拟环境管理：
+   - 自动创建Python虚拟环境（如果不存在）
+   - 自动激活虚拟环境
+   - Windows下在 `venv\Scripts\`
+   - Linux下在 `venv/bin/`
+
+3. 依赖安装：
+   - 自动安装Python依赖（requirements.txt）
+   - 自动安装前端依赖（package.json）
+
+4. 服务启动：
+   - 启动后端服务（FastAPI）
+   - 启动前端服务（React）
+
+### 日志和调试
+
+1. 查看运行日志：
+   ```bash
+   # Windows
+   start.bat > log.txt 2>&1
+   
+   # Linux/Mac
+   ./start.sh > log.txt 2>&1
+   ```
+
+2. 调试模式运行：
+   ```bash
+   # Windows PowerShell
+   $env:DEBUG=1; .\start.bat
+   
+   # Linux/Mac
+   DEBUG=1 ./start.sh
+   ```
+
+### 常见问题解决
+
+1. Python相关：
+   ```bash
+   # Linux安装Python虚拟环境包
+   sudo apt-get install python3-venv  # Ubuntu/Debian
+   sudo yum install python3-venv      # CentOS/RHEL
+   
+   # 检查Python位置
+   which python3  # Linux/Mac
+   where python   # Windows
+   ```
+
+2. Node.js相关：
+   ```bash
+   # 检查Node.js和npm版本
+   node --version
+   npm --version
+   
+   # 清除npm缓存
+   npm cache clean --force
+   ```
+
+3. 权限问题：
+   ```bash
+   # Windows PowerShell
+   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+   
+   # Linux/Mac
+   sudo chmod +x start.sh
+   ```
+
+4. 端口占用：
+   ```bash
+   # Windows
+   netstat -ano | findstr :8000  # 检查后端端口
+   netstat -ano | findstr :3000  # 检查前端端口
+   taskkill /F /PID 进程ID
+   
+   # Linux/Mac
+   lsof -i :8000  # 检查后端端口
+   lsof -i :3000  # 检查前端端口
+   kill $(lsof -t -i:8000)  # 结束后端进程
+   ```
 
 ## 配置说明
 
@@ -94,36 +197,6 @@ python scripts/check_config.py  # 仅检查配置
 python scripts/start.py  # 直接启动服务
 ```
 
-## 常见问题解决
-
-### Windows相关
-
-1. 权限问题
-```bash
-# 以管理员身份运行PowerShell并执行：
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-2. 端口占用
-```bash
-# 查找占用端口的进程
-netstat -ano | findstr :8000  # 后端端口
-netstat -ano | findstr :3000  # 前端端口
-
-# 结束进程
-taskkill /F /PID 进程ID
-```
-
-### Linux/Mac相关
-
-```bash
-# 端口占用处理
-lsof -i :8000  # 检查后端端口
-lsof -i :3000  # 检查前端端口
-kill $(lsof -t -i:8000)  # 结束后端进程
-kill $(lsof -t -i:3000)  # 结束前端进程
-```
-
 ## 项目结构
 
 ```
@@ -141,61 +214,151 @@ kill $(lsof -t -i:3000)  # 结束前端进程
 ├── uploads/          # 上传文件目录（自动创建）
 ├── start.bat         # Windows启动脚本
 ├── start.sh          # Linux/Mac启动脚本
+├── requirements.txt   # Python依赖
 └── .env              # 环境配置文件（需要创建）
 ```
 
 ## 开发指南
 
-### 1. 配置管理
-- 修改配置后建议先运行 `check_config.py` 验证
-- 开发新功能时先确保配置正确
-- 可以在 `.env` 中覆盖任何默认配置
+### 1. 开发环境准备
 
-### 2. 启动服务
-```bash
-# 完整启动（推荐）
-start.bat  # Windows
-./start.sh  # Linux/Mac
+1. IDE推荐：
+   - VS Code
+   - PyCharm
+   - WebStorm（前端开发）
 
-# 分步启动（调试用）
-python scripts/check_config.py  # 检查配置
-python scripts/start.py        # 启动服务
-```
+2. VS Code插件推荐：
+   - Python
+   - Pylance
+   - ESLint
+   - Prettier
+   - GitLens
 
-### 3. API文档
-启动服务后访问：
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
-- 前端页面: http://localhost:3000
+3. 代码风格：
+   - Python: PEP 8
+   - JavaScript: ESLint + Prettier
+   - 使用4空格缩进
+
+### 2. 配置管理
+
+1. 环境变量：
+   ```bash
+   # .env 文件示例
+   OPENAI_API_KEY=你的API密钥
+   OPENAI_BASE_URL=https://api.openai.com/v1  # 可选
+   DEBUG=True  # 开发模式
+   LOG_LEVEL=DEBUG  # 日志级别
+   ```
+
+2. 配置优先级：
+   - 环境变量 > .env文件 > 默认配置
+   - 修改配置后运行检查：
+     ```bash
+     python scripts/check_config.py
+     ```
+
+### 3. 开发工作流
+
+1. 代码更新：
+   ```bash
+   # 拉取最新代码
+   git pull
+   
+   # 安装新依赖
+   pip install -r requirements.txt
+   cd frontend && npm install && cd ..
+   ```
+
+2. 分步调试：
+   ```bash
+   # 后端调试（支持热重载）
+   cd src/api
+   uvicorn main:app --reload --port 8000
+   
+   # 前端调试（支持热重载）
+   cd frontend
+   npm start
+   ```
+
+3. 日志查看：
+   - 运行时日志：`logs/app.log`
+   - 错误日志：`logs/error.log`
+   - API访问日志：`logs/access.log`
+
+### 4. API文档
+
+1. 在线文档（服务启动后）：
+   - Swagger UI: http://localhost:8000/docs
+   - ReDoc: http://localhost:8000/redoc
+
+2. API测试：
+   - 使用Swagger UI进行在线测试
+   - 使用Postman进行本地测试
+   - curl命令示例在文档中提供
+
+### 5. 故障排除
+
+1. 服务无法启动：
+   - 检查端口占用
+   - 验证环境变量
+   - 查看错误日志
+
+2. API调用失败：
+   - 确认服务状态
+   - 检查API密钥
+   - 验证请求格式
+
+3. 前端页面问题：
+   - 清除浏览器缓存
+   - 检查Console错误
+   - 验证API连接
 
 ## 注意事项
 
-1. 确保Python和Node.js已添加到系统环境变量
-2. 如果使用代理，在 `.env` 中设置 `OPENAI_BASE_URL`
-3. 首次运行可能需要等待依赖安装
-4. 不要提交 `.env` 文件到版本控制系统
-5. 定期备份数据目录
+1. 安全性：
+   - 不要提交 `.env` 文件
+   - 定期更新依赖
+   - 注意API密钥保护
 
-## 调试提示
+2. 性能优化：
+   - 避免大量并发请求
+   - 合理设置超时时间
+   - 注意内存使用
 
-1. 检查配置：
-```bash
-python scripts/check_config.py
-```
+3. 开发建议：
+   - 遵循代码规范
+   - 编写单元测试
+   - 及时提交代码
 
-2. 查看日志：
-- 检查 `logs` 目录下的日志文件
-- 查看命令行输出的错误信息
+4. 环境维护：
+   - 定期更新依赖
+   - 备份重要数据
+   - 监控服务状态
 
-3. 单独启动服务：
-```bash
-# 前端
-cd frontend
-npm start
+## 贡献指南
 
-# 后端
-cd src/api
-uvicorn main:app --reload
-```
+1. 提交PR流程：
+   - Fork项目
+   - 创建特性分支
+   - 提交变更
+   - 发起Pull Request
 
-如果遇到问题，系统会提供详细的错误信息和解决建议。 
+2. 代码要求：
+   - 遵循项目代码风格
+   - 添加必要的注释
+   - 更新相关文档
+
+3. 文档维护：
+   - 更新README
+   - 添加注释
+   - 编写使用示例
+
+## 支持和帮助
+
+- 提交Issue报告问题
+- 查看Wiki获取详细指南
+- 通过Discussions讨论功能特性
+
+## 许可证
+
+MIT License - 详见 LICENSE 文件 

@@ -2,15 +2,15 @@
 echo 启动服务...
 
 REM 检查Python是否安装
-where python >nul 2>nul
-if %errorlevel% neq 0 (
+python --version >nul 2>&1
+if errorlevel 1 (
     echo Python未安装，请先安装Python
     exit /b 1
 )
 
 REM 检查Node.js是否安装
-where node >nul 2>nul
-if %errorlevel% neq 0 (
+node --version >nul 2>&1
+if errorlevel 1 (
     echo Node.js未安装，请先安装Node.js
     exit /b 1
 )
@@ -22,7 +22,7 @@ if not exist "venv" (
 )
 
 REM 激活虚拟环境
-call venv\Scripts\activate
+call venv\Scripts\activate.bat
 
 REM 安装依赖
 echo 安装Python依赖...
