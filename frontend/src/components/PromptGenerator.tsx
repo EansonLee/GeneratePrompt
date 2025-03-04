@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Button, Card, Input, Upload, message, Switch, Modal, Progress, Space, Alert } from 'antd';
-import { UploadOutlined } from '@ant-design/icons';
+import { Button, Card, Input, Upload, message, Switch, Modal, Progress, Space, Alert, Spin } from 'antd';
+import { UploadOutlined, LoadingOutlined } from '@ant-design/icons';
 import type { UploadFile } from 'antd/es/upload/interface';
 import { API_BASE_URL } from '../config';
 
@@ -20,6 +20,24 @@ interface ProcessingStatus {
     status: 'idle' | 'processing' | 'completed' | 'error';
 }
 
+// 自定义全屏加载图标
+const antIcon = <LoadingOutlined style={{ fontSize: 40 }} spin />;
+
+// 全屏加载组件样式
+const fullScreenLoadingStyle: React.CSSProperties = {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    width: '100vw',
+    height: '100vh',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    zIndex: 9999,
+    color: 'white',
+};
 
 const PromptGenerator: React.FC = () => {
     // 基础状态
@@ -30,7 +48,6 @@ const PromptGenerator: React.FC = () => {
     const [isDirectory, setIsDirectory] = useState(false);
     
     // 加载和处理状态
-    const [loading, setLoading] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const [processingStatus, setProcessingStatus] = useState<ProcessingStatus>({
         total: 0,
@@ -47,6 +64,18 @@ const PromptGenerator: React.FC = () => {
     const [showPromptConfirm, setShowPromptConfirm] = useState(false);
     const [tempTemplate, setTempTemplate] = useState('');
     const [tempOptimizedPrompt, setTempOptimizedPrompt] = useState('');
+    
+    // 保存状态
+    const [savingTemplate, setSavingTemplate] = useState(false);
+    const [savingPrompt, setSavingPrompt] = useState(false);
+    
+    // 生成状态
+    const [generatingTemplate, setGeneratingTemplate] = useState(false);
+    const [optimizingPrompt, setOptimizingPrompt] = useState(false);
+    
+    // 全屏加载状态
+    const [fullScreenLoading, setFullScreenLoading] = useState(false);
+    const [loadingMessage, setLoadingMessage] = useState('');
 
     // 检查向量数据库状态
     const checkVectorDbStatus = async () => {
@@ -103,7 +132,7 @@ const PromptGenerator: React.FC = () => {
         }
 
         try {
-            setLoading(true);
+            setGeneratingTemplate(true);
             const response = await fetch(`${API_BASE_URL}/api/generate-template`, {
                 method: 'POST',
                 headers: {
@@ -124,7 +153,7 @@ const PromptGenerator: React.FC = () => {
         } catch (error) {
             message.error('生成失败：' + error);
         } finally {
-            setLoading(false);
+            setGeneratingTemplate(false);
         }
     };
 
@@ -140,7 +169,7 @@ const PromptGenerator: React.FC = () => {
         }
 
         try {
-            setLoading(true);
+            setOptimizingPrompt(true);
             const response = await fetch(`${API_BASE_URL}/api/optimize-prompt`, {
                 method: 'POST',
                 headers: {
@@ -162,7 +191,7 @@ const PromptGenerator: React.FC = () => {
         } catch (error) {
             message.error('优化失败：' + error);
         } finally {
-            setLoading(false);
+            setOptimizingPrompt(false);
         }
     };
 
@@ -196,7 +225,7 @@ const PromptGenerator: React.FC = () => {
             const data = await response.json();
             if (data.status === 'success') {
                 // 更新文件列表
-                setFileList(prev => [...prev, file]);
+                setFileList(prev => [...prev, {...file, status: 'done'}]);
                 
                 // 更新处理状态为完成
                 setProcessingStatus({
@@ -220,18 +249,24 @@ const PromptGenerator: React.FC = () => {
             setProcessingStatus(prev => ({ ...prev, status: 'error' }));
             message.error(`${file.name} 上传失败：${error}`);
         } finally {
+            // 重要：立即重置上传状态
             setIsUploading(false);
+            
             // 3秒后清除完成状态
-            if (processingStatus.status === 'completed') {
-                setTimeout(() => {
-                    setProcessingStatus({
-                        total: 0,
-                        processed: 0,
-                        status: 'idle'
-                    });
-                }, 3000);
-            }
+            setTimeout(() => {
+                setProcessingStatus({
+                    total: 0,
+                    processed: 0,
+                    status: 'idle'
+                });
+            }, 3000);
         }
+    };
+
+    const handleFileListChange = ({ fileList }: { fileList: UploadFile[] }) => {
+        // 过滤掉上传中的文件，只保留上传成功的文件
+        const successFiles = fileList.filter(file => file.status === 'done');
+        setFileList(successFiles);
     };
 
     const beforeUpload = (file: UploadFile) => {
@@ -245,6 +280,16 @@ const PromptGenerator: React.FC = () => {
 
     const handleConfirmTemplate = async () => {
         try {
+            // 显示全屏加载
+            setFullScreenLoading(true);
+            setLoadingMessage('正在保存模板，请稍候...');
+            
+            // 添加保存状态，解决问题3
+            setSavingTemplate(true);
+            
+            // 关闭确认对话框
+            setShowTemplateConfirm(false);
+            
             const response = await fetch(`${API_BASE_URL}/api/confirm-template`, {
                 method: 'POST',
                 headers: {
@@ -257,18 +302,32 @@ const PromptGenerator: React.FC = () => {
             const data = await response.json();
             if (data.status === 'success') {
                 setTemplate(tempTemplate);
-                setShowTemplateConfirm(false);
                 message.success('模板已确认并保存到向量数据库！');
             } else {
                 message.error('保存失败：' + data.detail);
             }
         } catch (error) {
             message.error('保存失败：' + error);
+        } finally {
+            // 重置保存状态
+            setSavingTemplate(false);
+            // 隐藏全屏加载
+            setFullScreenLoading(false);
         }
     };
 
     const handleConfirmPrompt = async () => {
         try {
+            // 显示全屏加载
+            setFullScreenLoading(true);
+            setLoadingMessage('正在保存优化后的Prompt，请稍候...');
+            
+            // 添加保存状态，解决问题3
+            setSavingPrompt(true);
+            
+            // 关闭确认对话框
+            setShowPromptConfirm(false);
+            
             const response = await fetch(`${API_BASE_URL}/api/confirm-prompt`, {
                 method: 'POST',
                 headers: {
@@ -281,13 +340,17 @@ const PromptGenerator: React.FC = () => {
             const data = await response.json();
             if (data.status === 'success') {
                 setOptimizedPrompt(tempOptimizedPrompt);
-                setShowPromptConfirm(false);
                 message.success('优化后的Prompt已确认并保存到向量数据库！');
             } else {
                 message.error('保存失败：' + data.detail);
             }
         } catch (error) {
             message.error('保存失败：' + error);
+        } finally {
+            // 重置保存状态
+            setSavingPrompt(false);
+            // 隐藏全屏加载
+            setFullScreenLoading(false);
         }
     };
 
@@ -312,8 +375,23 @@ const PromptGenerator: React.FC = () => {
         );
     };
 
+    // 全屏加载组件
+    const renderFullScreenLoading = () => {
+        if (!fullScreenLoading) return null;
+        
+        return (
+            <div style={fullScreenLoadingStyle}>
+                <Spin indicator={antIcon} size="large" />
+                <div style={{ marginTop: 20, fontSize: 18 }}>{loadingMessage}</div>
+            </div>
+        );
+    };
+
     return (
         <div style={{ padding: 24 }}>
+            {/* 全屏加载组件 */}
+            {renderFullScreenLoading()}
+            
             {vectorDbStatus !== 'ready' && (
                 <Alert
                     message={vectorDbStatus === 'initializing' ? '向量数据库初始化中...' : '向量数据库错误'}
@@ -329,7 +407,7 @@ const PromptGenerator: React.FC = () => {
                     <Switch
                         checked={isDirectory}
                         onChange={setIsDirectory}
-                        disabled={isUploading || processingStatus.status === 'processing'}
+                        disabled={isUploading || processingStatus.status === 'processing' || fullScreenLoading}
                         checkedChildren="目录模式"
                         unCheckedChildren="文件模式"
                     />
@@ -337,12 +415,13 @@ const PromptGenerator: React.FC = () => {
                         beforeUpload={beforeUpload}
                         customRequest={({ file }) => handleUpload(file as UploadFile)}
                         fileList={fileList}
-                        onChange={({ fileList }) => setFileList(fileList)}
-                        disabled={isUploading || processingStatus.status === 'processing'}
+                        onChange={handleFileListChange}
+                        disabled={isUploading || processingStatus.status === 'processing' || fullScreenLoading}
                     >
                         <Button 
                             icon={<UploadOutlined />}
-                            disabled={isUploading || processingStatus.status === 'processing'}
+                            disabled={isUploading || processingStatus.status === 'processing' || fullScreenLoading}
+                            loading={isUploading}
                         >
                             选择{isDirectory ? '目录' : '文件'}
                         </Button>
@@ -357,8 +436,13 @@ const PromptGenerator: React.FC = () => {
                     <Button
                         type="primary"
                         onClick={handleGenerateTemplate}
-                        loading={loading}
-                        disabled={vectorDbStatus !== 'ready' || processingStatus.status === 'processing'}
+                        loading={generatingTemplate}
+                        disabled={
+                            vectorDbStatus !== 'ready' || 
+                            processingStatus.status === 'processing' || 
+                            isUploading || 
+                            fullScreenLoading
+                        }
                     >
                         生成模板
                     </Button>
@@ -379,13 +463,25 @@ const PromptGenerator: React.FC = () => {
                         value={prompt}
                         onChange={e => setPrompt(e.target.value)}
                         autoSize={{ minRows: 4, maxRows: 6 }}
-                        disabled={vectorDbStatus !== 'ready' || processingStatus.status === 'processing'}
+                        disabled={
+                            vectorDbStatus !== 'ready' || 
+                            processingStatus.status === 'processing' || 
+                            isUploading || 
+                            fullScreenLoading
+                        }
                     />
                     <Button
                         type="primary"
                         onClick={handleOptimizePrompt}
-                        loading={loading}
-                        disabled={vectorDbStatus !== 'ready' || !prompt || processingStatus.status === 'processing'}
+                        loading={optimizingPrompt}
+                        disabled={
+                            vectorDbStatus !== 'ready' || 
+                            !prompt || 
+                            processingStatus.status === 'processing' || 
+                            isUploading || 
+                            generatingTemplate || // 解决问题2：生成模板时禁用优化按钮
+                            fullScreenLoading
+                        }
                     >
                         优化Prompt
                     </Button>
@@ -405,11 +501,18 @@ const PromptGenerator: React.FC = () => {
                 onOk={handleConfirmTemplate}
                 onCancel={() => setShowTemplateConfirm(false)}
                 width={800}
+                confirmLoading={savingTemplate}
+                okButtonProps={{ disabled: savingTemplate }}
+                cancelButtonProps={{ disabled: savingTemplate }}
+                maskClosable={false}
+                closable={!savingTemplate}
+                keyboard={!savingTemplate}
             >
                 <TextArea
                     value={tempTemplate}
                     onChange={e => setTempTemplate(e.target.value)}
                     autoSize={{ minRows: 6, maxRows: 12 }}
+                    disabled={savingTemplate}
                 />
             </Modal>
 
@@ -419,11 +522,18 @@ const PromptGenerator: React.FC = () => {
                 onOk={handleConfirmPrompt}
                 onCancel={() => setShowPromptConfirm(false)}
                 width={800}
+                confirmLoading={savingPrompt}
+                okButtonProps={{ disabled: savingPrompt }}
+                cancelButtonProps={{ disabled: savingPrompt }}
+                maskClosable={false}
+                closable={!savingPrompt}
+                keyboard={!savingPrompt}
             >
                 <TextArea
                     value={tempOptimizedPrompt}
                     onChange={e => setTempOptimizedPrompt(e.target.value)}
                     autoSize={{ minRows: 6, maxRows: 12 }}
+                    disabled={savingPrompt}
                 />
             </Modal>
         </div>
