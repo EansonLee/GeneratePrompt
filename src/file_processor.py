@@ -141,6 +141,58 @@ class FileProcessor:
             return self.SUPPORTED_EXTENSIONS[ext]
         return 'unknown'
 
+    async def _get_file_content(self, file_path: Path) -> str:
+        """获取文件内容
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            str: 文件内容
+        """
+        try:
+            # 检查文件类型
+            if not self.is_supported_file(file_path.name):
+                raise ValueError(f"不支持的文件类型: {file_path.suffix}")
+                
+            # 获取文件类型
+            file_type = self.get_file_type(file_path.name)
+            
+            # 如果是压缩文件，使用 process_archive 处理
+            if file_type == 'archive':
+                archive_result = await self.process_archive(file_path)
+                if archive_result.get("status") == "success":
+                    # 返回处理结果的摘要
+                    return f"""
+                    压缩文件处理结果:
+                    - 成功处理文件数: {archive_result.get('processed_files', 0)}
+                    - 失败文件数: {archive_result.get('failed_files', 0)}
+                    - 总文本块数: {archive_result.get('total_chunks', 0)}
+                    """
+                else:
+                    raise ValueError(f"处理压缩文件失败: {archive_result.get('message', '未知错误')}")
+            
+            # 处理普通文件
+            if file_type == 'markdown':
+                loader = UnstructuredMarkdownLoader(str(file_path))
+            else:
+                loader = TextLoader(str(file_path), encoding='utf-8')
+                
+            # 加载文档
+            docs = loader.load()
+            
+            # 合并所有文档内容
+            content = "\n".join(doc.page_content for doc in docs)
+            
+            if not content.strip():
+                raise ValueError(f"文件内容为空: {file_path}")
+                
+            return content
+            
+        except Exception as e:
+            logger.error(f"读取文件内容失败 {file_path}: {str(e)}")
+            raise ValueError(f"读取文件内容失败: {str(e)}")
+
     async def process_file(self, file_path: Path, is_directory: bool = False) -> Dict[str, Any]:
         """处理上传的文件
         
@@ -153,78 +205,46 @@ class FileProcessor:
         """
         try:
             logger.info(f"开始处理文件: {file_path}")
-            logger.info(f"文件大小: {file_path.stat().st_size / 1024:.2f} KB")
-            logger.info(f"处理模式: {'目录模式' if is_directory else '文件模式'}")
             
-            # 获取文件类型
+            # 检查文件类型
             file_type = self.get_file_type(file_path.name)
-            logger.info(f"文件类型: {file_type}")
             
-            if not self.is_supported_file(file_path.name):
-                error_msg = f"不支持的文件类型: {Path(file_path).suffix}"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-            
-            # 如果是压缩文件且需要作为目录处理
-            if file_type == 'archive' and is_directory:
-                logger.info("开始处理压缩文件...")
+            # 如果是压缩文件，直接使用 process_archive
+            if file_type == 'archive':
+                logger.info("检测到压缩文件，使用压缩文件处理器...")
                 return await self.process_archive(file_path)
             
-            # 读取文件内容
-            logger.info("读取文件内容...")
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            logger.info(f"文件内容长度: {len(content)} 字符")
-            
-            # 提取关键信息
-            logger.info("提取文件关键信息...")
-            extracted_info = self._extract_key_information(content, file_path.name)
-            logger.info(f"提取的信息: {extracted_info}")
-            
+            # 获取文件内容
+            content = await self._get_file_content(file_path)
+            if not content:
+                raise ValueError(f"无法读取文件内容: {file_path}")
+                
             # 准备元数据
             metadata = {
                 "file_name": file_path.name,
-                "file_type": file_type,
+                "file_type": file_path.suffix.lstrip('.'),
                 "file_path": str(file_path),
-                "timestamp": datetime.now().isoformat(),
-                **extracted_info
+                "timestamp": datetime.now().isoformat()
             }
             logger.info(f"完整元数据: {metadata}")
             
-            # 等待向量数据库就绪
-            if not await self.vector_store.wait_until_ready():
-                error = self.vector_store.get_initialization_error()
-                raise ValueError(f"向量数据库未就绪: {error}")
-            
             # 添加到向量数据库
             logger.info("添加到向量数据库...")
-            chunks = self.vector_store.add_texts([content], [metadata])
-            logger.info(f"添加完成，生成了 {len(chunks) if chunks else 0} 个文本块")
+            await self.vector_store.add_texts(
+                texts=[content],
+                metadatas=[metadata]
+            )
             
-            # 验证插入
-            if self.vector_store.verify_insertion(content):
-                logger.info("文件内容成功添加到向量数据库")
-                return {
-                    "status": "success",
-                    "file_type": file_type,
-                    "chunks": len(chunks) if chunks else 0,
-                    "extracted_info": extracted_info
-                }
-            else:
-                error_msg = "文件内容可能未成功添加到向量数据库"
-                logger.error(error_msg)
-                return {
-                    "status": "error",
-                    "file_type": file_type,
-                    "message": error_msg
-                }
+            return {
+                "status": "success",
+                "file_name": file_path.name,
+                "file_type": metadata["file_type"],
+                "total_chunks": 1
+            }
             
         except Exception as e:
             logger.error(f"处理文件失败 {file_path}: {str(e)}")
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            raise ValueError(f"处理文件失败: {str(e)}")
 
     def _extract_key_information(self, content: str, file_name: str = None) -> Dict[str, Any]:
         """从文件内容中提取关键信息

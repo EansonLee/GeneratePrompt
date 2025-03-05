@@ -49,8 +49,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.API_CONFIG["cors_origins"],
     allow_credentials=True,
-    allow_methods=settings.API_CONFIG["cors_methods"],
-    allow_headers=settings.API_CONFIG["cors_headers"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,  # 预检请求的缓存时间
 )
 
 # 初始化文件处理器
@@ -61,6 +63,9 @@ class PromptRequest(BaseModel):
     context_files: Optional[List[str]] = None
 
 class TemplateRequest(BaseModel):
+    """模板生成请求模型"""
+    project_type: Optional[str] = None
+    project_description: Optional[str] = None
     context_files: Optional[List[str]] = None
 
 class ConfirmTemplateRequest(BaseModel):
@@ -81,17 +86,29 @@ async def generate_template(request: TemplateRequest) -> Dict[str, Any]:
     """
     try:
         logger.info("开始生成模板...")
+        logger.info(f"请求参数: {request.dict()}")
         
         # 使用全局向量存储实例
         template_generator = TemplateGenerator()
         template_generator.vector_store = vector_store
         
-        template = await template_generator.generate()
+        # 等待向量存储就绪
+        if not await vector_store.wait_until_ready():
+            error = vector_store.get_initialization_error()
+            raise ValueError(f"向量存储未就绪: {error}")
+        
+        # 调用异步方法生成模板
+        template = await template_generator.generate(
+            project_type=request.project_type,
+            project_description=request.project_description
+        )
+        
         logger.info("模板生成成功")
         
         return {
             "status": "success",
-            "template": template
+            "template": template,
+            "message": "模板生成成功"
         }
         
     except Exception as e:
@@ -113,17 +130,31 @@ async def optimize_prompt(request: PromptRequest) -> Dict[str, Any]:
     """
     try:
         logger.info("开始优化prompt...")
+        logger.info(f"请求参数: {request.dict()}")
         
         if not request.prompt:
             raise ValueError("提示词不能为空")
             
+        # 等待向量存储就绪
+        if not await vector_store.wait_until_ready():
+            error = vector_store.get_initialization_error()
+            raise ValueError(f"向量存储未就绪: {error}")
+            
         optimizer = PromptOptimizer(vector_store=vector_store)
-        optimized_prompt = await optimizer.optimize(request.prompt)
+        result = await optimizer.optimize(request.prompt)
+        
+        # 确保返回的是字符串
+        if isinstance(result, dict):
+            optimized_prompt = result.get("optimized_prompt", "") or result.get("content", "")
+        else:
+            optimized_prompt = str(result)
+            
         logger.info("Prompt优化成功")
         
         return {
             "status": "success",
-            "optimized_prompt": optimized_prompt
+            "optimized_prompt": optimized_prompt,
+            "message": "Prompt优化成功"
         }
         
     except Exception as e:

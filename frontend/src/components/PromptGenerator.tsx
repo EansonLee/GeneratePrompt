@@ -80,21 +80,41 @@ const PromptGenerator: React.FC = () => {
     // 检查向量数据库状态
     const checkVectorDbStatus = async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/vector-db-status`);
-            const data = await response.json();
+            console.log('正在检查向量数据库状态...');
+            const response = await fetch(`${API_BASE_URL}/api/vector-db-status`, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                mode: 'cors',
+                cache: 'no-cache'
+            });
             
-            if (response.ok) {
-                setVectorDbStatus(data.status);
-                setVectorDbError(data.error);
-                return data.status === 'ready';
-            } else {
+            if (!response.ok) {
+                console.error('向量数据库状态检查失败:', response.status, response.statusText);
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            console.log('Vector DB Status:', data);
+            
+            if (data.error) {
+                console.error('向量数据库错误:', data.error);
                 setVectorDbStatus('error');
-                setVectorDbError(data.detail || '检查向量数据库状态失败');
+                setVectorDbError(data.error);
                 return false;
             }
+            
+            setVectorDbStatus(data.status);
+            setVectorDbError(null);
+            
+            return data.status === 'ready';
+            
         } catch (error) {
+            console.error('检查向量数据库状态失败:', error);
             setVectorDbStatus('error');
-            setVectorDbError('检查向量数据库状态失败');
+            setVectorDbError(error instanceof Error ? error.message : '检查向量数据库状态失败');
             return false;
         }
     };
@@ -102,18 +122,28 @@ const PromptGenerator: React.FC = () => {
     // 定期检查向量数据库状态
     useEffect(() => {
         let intervalId: NodeJS.Timeout;
+        let retryCount = 0;
+        const maxRetries = 5;  // 最大重试次数
         
-        const startStatusCheck = () => {
+        const startStatusCheck = async () => {
             // 立即检查一次
-            checkVectorDbStatus();
+            const isReady = await checkVectorDbStatus();
             
-            // 如果数据库未就绪，每5秒检查一次
-            intervalId = setInterval(async () => {
-                const isReady = await checkVectorDbStatus();
-                if (isReady) {
-                    clearInterval(intervalId);
-                }
-            }, 5000);
+            if (!isReady && retryCount < maxRetries) {
+                // 如果数据库未就绪，每5秒检查一次
+                intervalId = setInterval(async () => {
+                    retryCount++;
+                    const ready = await checkVectorDbStatus();
+                    
+                    if (ready || retryCount >= maxRetries) {
+                        clearInterval(intervalId);
+                        if (!ready && retryCount >= maxRetries) {
+                            console.error('向量数据库初始化超时');
+                            setVectorDbError('向量数据库初始化超时，请刷新页面重试');
+                        }
+                    }
+                }, 5000);
+            }
         };
         
         startStatusCheck();
@@ -139,19 +169,25 @@ const PromptGenerator: React.FC = () => {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    context_files: fileList.map(file => file.name),
-                }),
+                    project_type: null,
+                    project_description: null,
+                    context_files: []
+                })
             });
-            const data = await response.json();
-            if (data.status === 'success') {
-                setTempTemplate(data.template);
-                setShowTemplateConfirm(true);
-                message.success('模板生成成功！请确认内容');
-            } else {
-                message.error('生成失败：' + data.detail);
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || '生成模板失败');
             }
+
+            const data = await response.json();
+            // 设置临时模板并打开确认对话框
+            setTempTemplate(data.template);
+            setShowTemplateConfirm(true);
+            message.success('模板生成成功，请确认或编辑后保存');
         } catch (error) {
-            message.error('生成失败：' + error);
+            console.error('生成模板失败:', error);
+            message.error(error instanceof Error ? error.message : '生成模板失败');
         } finally {
             setGeneratingTemplate(false);
         }
@@ -176,20 +212,28 @@ const PromptGenerator: React.FC = () => {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    prompt,
-                    context_files: fileList.map(file => file.name),
-                }),
+                    prompt: prompt,
+                    context_files: fileList.map(file => file.name)
+                })
             });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || '优化prompt失败');
+            }
+
             const data = await response.json();
             if (data.status === 'success') {
+                // 设置临时优化后的prompt并打开确认对话框
                 setTempOptimizedPrompt(data.optimized_prompt);
                 setShowPromptConfirm(true);
-                message.success('优化成功！请确认内容');
+                message.success('Prompt优化成功，请确认或编辑后保存');
             } else {
-                message.error('优化失败：' + data.detail);
+                throw new Error(data.detail || '优化失败');
             }
         } catch (error) {
-            message.error('优化失败：' + error);
+            console.error('优化prompt失败:', error);
+            message.error(error instanceof Error ? error.message : '优化prompt失败');
         } finally {
             setOptimizingPrompt(false);
         }
@@ -447,11 +491,22 @@ const PromptGenerator: React.FC = () => {
                         生成模板
                     </Button>
                     {template && (
-                        <TextArea
-                            value={template}
-                            autoSize={{ minRows: 4, maxRows: 8 }}
-                            readOnly
-                        />
+                        <>
+                            <TextArea
+                                value={template}
+                                onChange={e => setTemplate(e.target.value)}
+                                autoSize={{ minRows: 4, maxRows: 8 }}
+                            />
+                            <Button 
+                                type="primary"
+                                onClick={() => {
+                                    setTempTemplate(template);
+                                    setShowTemplateConfirm(true);
+                                }}
+                            >
+                                保存模板
+                            </Button>
+                        </>
                     )}
                 </Space>
             </Card>
@@ -479,18 +534,29 @@ const PromptGenerator: React.FC = () => {
                             !prompt || 
                             processingStatus.status === 'processing' || 
                             isUploading || 
-                            generatingTemplate || // 解决问题2：生成模板时禁用优化按钮
+                            generatingTemplate || 
                             fullScreenLoading
                         }
                     >
                         优化Prompt
                     </Button>
                     {optimizedPrompt && (
-                        <TextArea
-                            value={optimizedPrompt}
-                            autoSize={{ minRows: 4, maxRows: 8 }}
-                            readOnly
-                        />
+                        <>
+                            <TextArea
+                                value={optimizedPrompt}
+                                onChange={e => setOptimizedPrompt(e.target.value)}
+                                autoSize={{ minRows: 4, maxRows: 8 }}
+                            />
+                            <Button 
+                                type="primary"
+                                onClick={() => {
+                                    setTempOptimizedPrompt(optimizedPrompt);
+                                    setShowPromptConfirm(true);
+                                }}
+                            >
+                                保存优化后的Prompt
+                            </Button>
+                        </>
                     )}
                 </Space>
             </Card>

@@ -7,6 +7,9 @@ from config.config import DEFAULT_MODEL_NAME
 from src.agents.prompt_optimization_agent import PromptOptimizationAgent
 from src.utils.vector_store import VectorStore
 from langchain_core.messages import AIMessage
+from src.utils.rag_manager import RAGManager
+import json
+import asyncio
 
 @pytest.fixture
 def mock_openai():
@@ -56,11 +59,33 @@ def prompt_optimizer(mock_openai, mock_embeddings, mock_faiss):
 
 @pytest.fixture
 def mock_vector_store():
-    """模拟向量存储的fixture"""
-    with patch('src.prompt_optimizer.VectorStore') as mock:
-        mock_instance = Mock()
-        mock.return_value = mock_instance
-        yield mock_instance
+    """Mock向量存储"""
+    store = Mock(spec=VectorStore)
+    store.similarity_search.return_value = [
+        "历史提示词1",
+        "历史提示词2"
+    ]
+    return store
+
+@pytest.fixture
+def mock_rag_manager():
+    """Mock RAG管理器"""
+    manager = Mock(spec=RAGManager)
+    manager.enhance_prompt.return_value = {
+        "enhanced_prompt": "增强后的提示词",
+        "context": {
+            "technical": ["技术上下文"],
+            "business": ["业务上下文"],
+            "examples": ["示例"],
+            "best_practices": ["最佳实践"]
+        }
+    }
+    return manager
+
+@pytest.fixture
+def optimizer(mock_vector_store):
+    """创建优化器实例"""
+    return PromptOptimizer(vector_store=mock_vector_store)
 
 def test_init(prompt_optimizer):
     """测试初始化"""
@@ -404,3 +429,479 @@ def test_set_model_parameters():
 
     # 验证参数设置（在测试模式下不会实际改变参数）
     assert True  # 只要不抛出异常就算通过 
+
+@pytest.mark.asyncio
+async def test_optimize_empty_prompt(optimizer):
+    """测试空提示词"""
+    with pytest.raises(ValueError, match="提示词不能为空"):
+        await optimizer.optimize("")
+
+@pytest.mark.asyncio
+async def test_optimize_success(optimizer, mock_vector_store):
+    """测试成功优化提示词"""
+    # 准备测试数据
+    test_prompt = "测试提示词"
+    mock_vector_store.similarity_search.return_value = ["历史提示词1", "历史提示词2"]
+    
+    # 执行优化
+    result = await optimizer.optimize(test_prompt)
+    
+    # 验证结果
+    assert isinstance(result, dict)
+    assert "optimized_prompt" in result
+    assert "analysis" in result
+    assert "suggestions" in result
+    assert "scores" in result
+    assert "timestamp" in result
+    
+    # 验证调用
+    mock_vector_store.similarity_search.assert_called_once()
+    
+@pytest.mark.asyncio
+async def test_optimize_with_context(optimizer):
+    """测试带上下文的优化"""
+    # 准备测试数据
+    test_prompt = "测试提示词"
+    test_context = {
+        "tech_stack": {
+            "frontend": ["React"],
+            "backend": ["Python"]
+        }
+    }
+    
+    # 执行优化
+    result = await optimizer.optimize(test_prompt, context=test_context)
+    
+    # 验证结果
+    assert isinstance(result, dict)
+    assert result["optimized_prompt"]
+    
+@pytest.mark.asyncio
+async def test_enhance_with_rag(optimizer):
+    """测试RAG增强"""
+    # 准备测试数据
+    test_prompt = "测试提示词"
+    similar_prompts = ["历史1", "历史2"]
+    
+    # 执行增强
+    result = await optimizer._enhance_with_rag(test_prompt, similar_prompts)
+    
+    # 验证结果
+    assert isinstance(result, (dict, str))
+    
+@pytest.mark.asyncio
+async def test_evaluate_prompt(optimizer):
+    """测试提示词评估"""
+    # 准备测试数据
+    test_prompt = "测试提示词"
+    
+    # 执行评估
+    result = await optimizer._evaluate_prompt(test_prompt)
+    
+    # 验证结果
+    assert isinstance(result, dict)
+    assert "scores" in result
+    assert "feedback" in result
+    assert "improvement_suggestions" in result
+    
+@pytest.mark.asyncio
+async def test_save_optimization_result(optimizer, tmp_path):
+    """测试保存优化结果"""
+    # 准备测试数据
+    original_prompt = "原始提示词"
+    optimized_prompt = "优化后的提示词"
+    evaluation = {
+        "scores": {
+            "completeness": 8,
+            "clarity": 9
+        },
+        "feedback": ["反馈1"],
+        "improvement_suggestions": ["建议1"]
+    }
+    context = {
+        "tech_stack": {
+            "frontend": ["React"]
+        }
+    }
+    
+    # 执行保存
+    await optimizer._save_optimization_result(
+        original_prompt=original_prompt,
+        optimized_prompt=optimized_prompt,
+        evaluation=evaluation,
+        context=context
+    )
+    
+    # 验证调用
+    optimizer.vector_store.add_prompt_history.assert_called_once()
+    
+def test_get_project_context(optimizer):
+    """测试获取项目上下文"""
+    # 执行获取
+    context = optimizer._get_project_context()
+    
+    # 验证结果
+    assert isinstance(context, dict)
+    assert "tech_stack" in context
+    assert "file_structure" in context
+    assert "output_paths" in context
+    
+@pytest.mark.asyncio
+async def test_error_handling(optimizer):
+    """测试错误处理"""
+    # 模拟错误
+    optimizer.vector_store.similarity_search.side_effect = Exception("测试错误")
+    
+    # 验证错误处理
+    with pytest.raises(Exception):
+        await optimizer.optimize("测试提示词")
+        
+@pytest.mark.asyncio
+async def test_performance(optimizer):
+    """测试性能"""
+    import time
+    
+    # 准备测试数据
+    test_prompt = "测试提示词" * 100  # 长文本
+    
+    # 测量执行时间
+    start_time = time.time()
+    await optimizer.optimize(test_prompt)
+    end_time = time.time()
+    
+    # 验证执行时间在合理范围内
+    assert end_time - start_time < 5  # 假设5秒是合理的超时时间
+
+@pytest.mark.integration
+class TestIntegration:
+    """集成测试类"""
+    
+    @pytest.mark.asyncio
+    async def test_full_optimization_flow(self):
+        """测试完整的优化流程"""
+        # 创建真实的组件实例
+        vector_store = VectorStore()
+        rag_manager = RAGManager(vector_store=vector_store)
+        optimizer = PromptOptimizer(vector_store=vector_store)
+        
+        # 准备测试数据
+        test_prompt = """
+        请实现一个React组件，要求：
+        1. 使用TypeScript
+        2. 包含表单验证
+        3. 支持响应式布局
+        """
+        
+        # 1. 添加上下文
+        await rag_manager.add_context(
+            content="React最佳实践示例",
+            content_type="best_practice"
+        )
+        
+        # 2. 使用RAG增强
+        enhanced = await rag_manager.enhance_prompt(test_prompt)
+        
+        # 3. 优化提示词
+        result = await optimizer.optimize(
+            prompt=enhanced["enhanced_prompt"]
+        )
+        
+        # 验证结果
+        assert isinstance(result, dict)
+        assert "optimized_prompt" in result
+        assert "analysis" in result
+        assert "suggestions" in result
+        assert "scores" in result
+        assert "rag_info" in result
+        
+        # 验证优化质量
+        assert len(result["optimized_prompt"]) > len(test_prompt)
+        assert "TypeScript" in result["optimized_prompt"]
+        assert "React" in result["optimized_prompt"]
+        
+        # 验证评分
+        assert all(0 <= score <= 10 for score in result["scores"].values())
+        
+@pytest.mark.benchmark
+class TestBenchmark:
+    """性能基准测试类"""
+    
+    @pytest.mark.asyncio
+    async def test_optimization_performance(self, benchmark):
+        """测试优化性能"""
+        # 创建优化器实例
+        optimizer = PromptOptimizer()
+        
+        # 准备测试数据
+        test_prompts = [
+            "短提示词",
+            "中等长度的提示词" * 10,
+            "长提示词" * 100
+        ]
+        
+        # 执行基准测试
+        for prompt in test_prompts:
+            result = await optimizer.optimize(prompt)
+            
+            # 验证结果
+            assert isinstance(result, dict)
+            assert "optimized_prompt" in result
+            
+        # 验证内存使用
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        
+        # 确保内存使用在合理范围内（例如小于500MB）
+        assert memory_info.rss < 500 * 1024 * 1024 
+
+@pytest.mark.asyncio
+async def test_cache_mechanism(optimizer):
+    """测试缓存机制"""
+    # 准备测试数据
+    test_prompt = "测试提示词"
+    test_context = {"test": "context"}
+    
+    # 第一次调用
+    result1 = await optimizer.optimize(test_prompt, test_context)
+    
+    # 第二次调用应该使用缓存
+    result2 = await optimizer.optimize(test_prompt, test_context)
+    
+    # 验证结果
+    assert result1 == result2
+    assert optimizer.cache.get(f"{test_prompt}:{json.dumps(test_context)}") is not None
+
+@pytest.mark.asyncio
+async def test_cache_expiration(optimizer):
+    """测试缓存过期"""
+    # 设置较短的TTL
+    optimizer.cache.ttl = 1
+    
+    # 添加测试数据到缓存
+    test_key = "test_key"
+    test_value = {"test": "value"}
+    optimizer.cache.set(test_key, test_value)
+    
+    # 验证缓存存在
+    assert optimizer.cache.get(test_key) == test_value
+    
+    # 等待缓存过期
+    await asyncio.sleep(2)
+    
+    # 验证缓存已过期
+    assert optimizer.cache.get(test_key) is None
+
+@pytest.mark.asyncio
+async def test_batch_optimization(optimizer):
+    """测试批量优化"""
+    # 准备测试数据
+    test_prompts = [
+        "测试提示词1",
+        "测试提示词2",
+        "测试提示词3"
+    ]
+    
+    # 执行批量优化
+    results = await optimizer.optimize_batch(test_prompts)
+    
+    # 验证结果
+    assert len(results) == len(test_prompts)
+    assert all(isinstance(result, dict) for result in results)
+    assert all("optimized_prompt" in result for result in results)
+
+@pytest.mark.asyncio
+async def test_parallel_processing(optimizer):
+    """测试并行处理"""
+    import time
+    
+    # 准备测试数据
+    test_prompts = ["测试提示词"] * 5
+    
+    # 测量串行处理时间
+    start_time = time.time()
+    for prompt in test_prompts:
+        await optimizer.optimize(prompt)
+    serial_time = time.time() - start_time
+    
+    # 测量并行处理时间
+    start_time = time.time()
+    await optimizer.optimize_batch(test_prompts)
+    parallel_time = time.time() - start_time
+    
+    # 验证并行处理更快
+    assert parallel_time < serial_time
+
+@pytest.mark.asyncio
+async def test_vector_retrieval_optimization(optimizer):
+    """测试向量检索优化"""
+    # 准备测试数据
+    test_prompt = "测试提示词"
+    
+    # 获取嵌入向量
+    embedding1 = optimizer._get_embedding(test_prompt)
+    embedding2 = optimizer._get_embedding(test_prompt)
+    
+    # 验证缓存生效
+    assert embedding1 == embedding2
+    
+    # 验证相似度过滤
+    similar_prompts = ["相似1", "相似2", "不相关"]
+    filtered_result = await optimizer._enhance_with_rag(test_prompt, similar_prompts)
+    
+    assert isinstance(filtered_result, dict)
+    assert "relevant_info" in str(filtered_result)
+
+@pytest.mark.benchmark
+class TestPerformance:
+    """性能测试类"""
+    
+    @pytest.mark.asyncio
+    async def test_memory_usage(self, optimizer):
+        """测试内存使用"""
+        import psutil
+        import os
+        
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss
+        
+        # 执行大量操作
+        test_prompts = ["测试提示词"] * 100
+        await optimizer.optimize_batch(test_prompts)
+        
+        # 验证内存增长在合理范围内
+        final_memory = process.memory_info().rss
+        memory_increase = (final_memory - initial_memory) / 1024 / 1024  # MB
+        
+        assert memory_increase < 500  # 内存增长不超过500MB
+        
+    @pytest.mark.asyncio
+    async def test_cache_hit_rate(self, optimizer):
+        """测试缓存命中率"""
+        # 准备测试数据
+        test_prompts = ["提示词A", "提示词B", "提示词A", "提示词C", "提示词B"]
+        
+        # 执行优化
+        for prompt in test_prompts:
+            await optimizer.optimize(prompt)
+            
+        # 计算缓存命中率
+        cache_entries = len(optimizer.cache.cache)
+        expected_entries = len(set(test_prompts))  # 去重后的提示词数量
+        
+        assert cache_entries == expected_entries
+        
+    @pytest.mark.asyncio
+    async def test_concurrent_requests(self, optimizer):
+        """测试并发请求处理"""
+        # 准备测试数据
+        test_prompts = [f"并发测试{i}" for i in range(10)]
+        
+        # 创建并发任务
+        tasks = [optimizer.optimize(prompt) for prompt in test_prompts]
+        
+        # 并发执行
+        results = await asyncio.gather(*tasks)
+        
+        # 验证所有请求都成功处理
+        assert len(results) == len(test_prompts)
+        assert all(isinstance(result, dict) for result in results)
+        
+    @pytest.mark.asyncio
+    async def test_error_recovery(self, optimizer, monkeypatch):
+        """测试错误恢复"""
+        # 模拟间歇性失败
+        fail_count = 0
+        
+        def mock_similarity_search(*args, **kwargs):
+            nonlocal fail_count
+            fail_count += 1
+            if fail_count % 2 == 1:
+                raise Exception("模拟失败")
+            return ["测试文档"]
+            
+        monkeypatch.setattr(optimizer.vector_store, "similarity_search", mock_similarity_search)
+        
+        # 执行优化（应该自动重试）
+        result = await optimizer.optimize("测试提示词")
+        
+        # 验证最终成功
+        assert isinstance(result, dict)
+        assert "optimized_prompt" in result
+        
+@pytest.mark.benchmark
+class TestPerformance:
+    """性能测试类"""
+    
+    @pytest.mark.asyncio
+    async def test_memory_usage(self, optimizer):
+        """测试内存使用"""
+        import psutil
+        import os
+        
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss
+        
+        # 执行大量操作
+        test_prompts = ["测试提示词"] * 100
+        await optimizer.optimize_batch(test_prompts)
+        
+        # 验证内存增长在合理范围内
+        final_memory = process.memory_info().rss
+        memory_increase = (final_memory - initial_memory) / 1024 / 1024  # MB
+        
+        assert memory_increase < 500  # 内存增长不超过500MB
+        
+    @pytest.mark.asyncio
+    async def test_cache_hit_rate(self, optimizer):
+        """测试缓存命中率"""
+        # 准备测试数据
+        test_prompts = ["提示词A", "提示词B", "提示词A", "提示词C", "提示词B"]
+        
+        # 执行优化
+        for prompt in test_prompts:
+            await optimizer.optimize(prompt)
+            
+        # 计算缓存命中率
+        cache_entries = len(optimizer.cache.cache)
+        expected_entries = len(set(test_prompts))  # 去重后的提示词数量
+        
+        assert cache_entries == expected_entries
+        
+    @pytest.mark.asyncio
+    async def test_concurrent_requests(self, optimizer):
+        """测试并发请求处理"""
+        # 准备测试数据
+        test_prompts = [f"并发测试{i}" for i in range(10)]
+        
+        # 创建并发任务
+        tasks = [optimizer.optimize(prompt) for prompt in test_prompts]
+        
+        # 并发执行
+        results = await asyncio.gather(*tasks)
+        
+        # 验证所有请求都成功处理
+        assert len(results) == len(test_prompts)
+        assert all(isinstance(result, dict) for result in results)
+        
+    @pytest.mark.asyncio
+    async def test_error_recovery(self, optimizer, monkeypatch):
+        """测试错误恢复"""
+        # 模拟间歇性失败
+        fail_count = 0
+        
+        def mock_similarity_search(*args, **kwargs):
+            nonlocal fail_count
+            fail_count += 1
+            if fail_count % 2 == 1:
+                raise Exception("模拟失败")
+            return ["测试文档"]
+            
+        monkeypatch.setattr(optimizer.vector_store, "similarity_search", mock_similarity_search)
+        
+        # 执行优化（应该自动重试）
+        result = await optimizer.optimize("测试提示词")
+        
+        # 验证最终成功
+        assert isinstance(result, dict)
+        assert "optimized_prompt" in result 

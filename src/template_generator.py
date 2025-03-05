@@ -58,7 +58,7 @@ class TemplateGenerator:
             max_tokens=settings.TEMPLATE_GENERATION_CONFIG["max_tokens"]
         )
         
-    def _get_context(self) -> Dict[str, Any]:
+    async def _get_context(self) -> Dict[str, Any]:
         """获取上下文信息
         
         Returns:
@@ -68,15 +68,22 @@ class TemplateGenerator:
             Exception: 获取上下文失败时抛出异常
         """
         try:
-            contexts = self.vector_store.search_contexts(
+            contexts = await self.vector_store.search_contexts(
                 limit=settings.TEMPLATE_GENERATION_CONFIG["max_contexts"]
             )
-            templates = self.vector_store.search_templates(
+            templates = await self.vector_store.search_templates(
                 limit=settings.TEMPLATE_GENERATION_CONFIG["max_templates"]
             )
             
-            if not contexts or not templates:
-                raise Exception("无法获取足够的上下文或模板信息")
+            # 如果没有足够的上下文或模板，使用默认值
+            if not contexts:
+                contexts = [{
+                    "content": "这是一个新项目，需要生成完整的项目模板。",
+                    "metadata": {"type": "context", "category": "project"}
+                }]
+            
+            if not templates:
+                templates = [self.DEFAULT_TEMPLATE]
             
             return {
                 "contexts": contexts,
@@ -84,7 +91,14 @@ class TemplateGenerator:
             }
         except Exception as e:
             logger.error(f"获取上下文失败: {str(e)}")
-            raise Exception(f"获取上下文失败: {str(e)}")
+            # 返回默认值而不是抛出异常
+            return {
+                "contexts": [{
+                    "content": "这是一个新项目，需要生成完整的项目模板。",
+                    "metadata": {"type": "context", "category": "project"}
+                }],
+                "templates": [self.DEFAULT_TEMPLATE]
+            }
             
     def validate_template(self, template: str) -> Tuple[bool, List[str]]:
         """验证模板是否包含所有必要信息
@@ -121,31 +135,21 @@ class TemplateGenerator:
                 error = self.vector_store.get_initialization_error()
                 raise ValueError(f"向量数据库未就绪: {error}")
             
-            # 构建提示词
-            messages = [
-                {"role": "system", "content": settings.TEMPLATE_SYSTEM_PROMPT},
-                {"role": "user", "content": f"""
-请根据以下信息生成项目模板：
-
-项目类型：{project_type or '未指定'}
-项目描述：{project_description or '未指定'}
-
-请生成一个完整的项目模板，包含所有必要的技术选型和实现方案。
-"""}
-            ]
+            # 获取上下文信息
+            context = await self._get_context()
             
-            # 调用语言模型
-            response = await self.agent.llm.ainvoke(messages)
+            # 调用代理生成模板
+            template = await self.agent.generate(
+                contexts=context["contexts"],
+                templates=context["templates"]
+            )
             
-            if not response or not response.content:
-                raise ValueError("模板生成失败：未获得有效响应")
-                
-            template_content = response.content
+            # 验证模板
+            is_valid, missing_fields = self.validate_template(template)
+            if not is_valid:
+                raise ValueError(f"生成的模板缺少必要字段: {', '.join(missing_fields)}")
             
-            # 移除自动保存到向量数据库的逻辑
-            # 将在用户确认后通过confirm_template API保存
-            
-            return template_content
+            return template
             
         except Exception as e:
             logger.error(f"生成模板失败: {str(e)}")

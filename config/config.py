@@ -46,15 +46,22 @@ class Config:
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     
     # 向量数据库配置
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
     VECTOR_STORE_CONFIG: Dict[str, Any] = {
         "collection_name": "prompt_optimization",
-        "distance_strategy": "cosine",
-        "chunk_size": CHUNK_SIZE,
-        "chunk_overlap": CHUNK_OVERLAP,
-        "separators": ["\n\n", "\n", " ", ""],
-        "persist_directory": VECTOR_DB_PATH
+        "distance_strategy": "cosine",  # 使用余弦相似度
+        "chunk_size": 1000,  # 减小分块大小以提高性能
+        "chunk_overlap": 200,  # 减小重叠大小
+        "separators": ["\n\n", "\n", ". ", ", ", " "],  # 优化分隔符
+        "persist_directory": VECTOR_DB_PATH,
+        "enable_dynamic_chunking": True,  # 启用动态分块
+        "enable_semantic_deduplication": True,  # 启用语义去重
+        "deduplication_threshold": 0.95,  # 去重阈值
+        "batch_size": 32,  # 批处理大小
+        "max_retries": 3,  # 最大重试次数
+        "timeout": 30,  # 超时时间（秒）
+        "cache_ttl": 3600,  # 缓存生存时间（秒）
+        "max_concurrent_requests": 5,  # 最大并发请求数
+        "slow_query_threshold": 5.0  # 降低慢查询阈值到5秒
     }
     
     # 模型配置
@@ -76,10 +83,29 @@ class Config:
     
     # Prompt优化配置
     PROMPT_OPTIMIZATION_CONFIG: Dict[str, Any] = {
-        "temperature": safe_float(os.getenv("PROMPT_OPTIMIZATION_TEMPERATURE", "0.7"), 0.7),
-        "max_tokens": safe_int(os.getenv("PROMPT_OPTIMIZATION_MAX_TOKENS", "4000"), 4000),
-        "chunk_size": safe_int(os.getenv("PROMPT_OPTIMIZATION_CHUNK_SIZE", "1000"), 1000),
-        "chunk_overlap": safe_int(os.getenv("PROMPT_OPTIMIZATION_CHUNK_OVERLAP", "200"), 200)
+        "temperature": 0.3,  # 降低温度提高稳定性
+        "max_tokens": safe_int(os.getenv("PROMPT_OPTIMIZATION_MAX_TOKENS", "2000"), 2000),  # 减小token数量
+        "chunk_size": 1000,  # 减小分块大小
+        "chunk_overlap": 200,  # 减小重叠大小
+        # 缓存配置
+        "cache_size": safe_int(os.getenv("PROMPT_CACHE_SIZE", "2000"), 2000),  # 增加缓存大小
+        "cache_ttl": 86400,  # 增加缓存时间到24小时
+        # 并行处理配置
+        "max_workers": safe_int(os.getenv("PROMPT_MAX_WORKERS", "4"), 4),
+        "batch_size": safe_int(os.getenv("PROMPT_BATCH_SIZE", "5"), 5),  # 减小批处理大小
+        # 向量检索优化
+        "similarity_threshold": 0.75,
+        "max_similar_prompts": 5,  # 减少检索数量
+        "embedding_batch_size": safe_int(os.getenv("PROMPT_EMBEDDING_BATCH_SIZE", "16"), 16),  # 减小批处理大小
+        # 性能监控
+        "enable_monitoring": os.getenv("PROMPT_ENABLE_MONITORING", "True").lower() == "true",
+        "slow_query_threshold": 5.0,  # 降低慢查询阈值到5秒
+        "max_retries": 2,  # 减少重试次数
+        "retry_delay": 0.5,  # 减少重试延迟
+        # RAG配置
+        "search_type": "similarity",  # 改用简单相似度搜索以提高性能
+        "lambda_mult": 0.7,
+        "rerank_top_k": 3
     }
     
     # 文件处理配置
@@ -110,18 +136,44 @@ class Config:
     
     # API配置
     API_CONFIG: Dict[str, Any] = {
-        "title": "Prompt生成优化API",
-        "description": "提供Prompt模板生成和优化的API服务",
+        "title": "Prompt Generator API",
+        "description": "用于生成和优化Prompt的API服务",
         "version": "1.0.0",
-        "cors_origins": os.getenv("CORS_ORIGINS", "*").split(","),
-        "cors_methods": ["*"],
-        "cors_headers": ["*"]
+        "cors_origins": ["*"],  # 允许所有来源，生产环境中应该限制
+        "cors_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "cors_headers": ["*"],
     }
     
     # 系统提示词
     TEMPLATE_SYSTEM_PROMPT: str = """你是一个专业的模板生成助手。请根据提供的上下文信息和历史模板，生成一个新的、完整的项目模板。
 
 模板必须包含以下所有部分（缺一不可）：
+
+## 工程目录结构
+- 源代码目录（src/）
+  - 前端代码目录
+  - 后端代码目录
+  - 共享代码目录
+- 资源目录（assets/）
+  - 图片资源
+  - 样式资源
+  - 静态文件
+- 配置目录（config/）
+  - 环境配置
+  - 应用配置
+  - 部署配置
+- 测试目录（tests/）
+  - 单元测试
+  - 集成测试
+  - E2E测试
+- 文档目录（docs/）
+  - API文档
+  - 开发文档
+  - 部署文档
+- 构建目录（build/）
+  - 构建脚本
+  - 构建配置
+  - 输出目录
 
 ## 前端技术
 - 必须指定前端框架（如React、Vue等）
@@ -189,6 +241,13 @@ class Config:
 2. 明确技术要求
 3. 描述交互细节
 4. 考虑性能和用户体验
+5. 明确工程目录结构和文件组织方式，包括：
+   - 源代码目录组织
+   - 资源文件目录
+   - 配置文件目录
+   - 测试目录
+   - 文档目录
+   - 构建输出目录
 """
 
 # 创建全局配置实例
