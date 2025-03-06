@@ -3,8 +3,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import logging
 from datetime import datetime
 from config.config import settings
-from src.utils.vector_store import VectorStore
-from src.agents.template_generation_agent import TemplateGenerationAgent
+from .utils.vector_store import VectorStore
+from .agents.template_generation_agent import TemplateGenerationAgent
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 

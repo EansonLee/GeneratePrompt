@@ -77,6 +77,9 @@ const PromptGenerator: React.FC = () => {
     const [fullScreenLoading, setFullScreenLoading] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('');
 
+    // 优化结果状态
+    const [optimizationResult, setOptimizationResult] = useState<any>(null);
+
     // 检查向量数据库状态
     const checkVectorDbStatus = async () => {
         try {
@@ -217,23 +220,40 @@ const PromptGenerator: React.FC = () => {
                 })
             });
 
+            const data = await response.json();
+            
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.detail || '优化prompt失败');
+                const errorMessage = data.detail?.message || '优化prompt失败';
+                throw new Error(errorMessage);
             }
 
-            const data = await response.json();
             if (data.status === 'success') {
+                // 保存优化结果
+                setOptimizationResult(data);
                 // 设置临时优化后的prompt并打开确认对话框
                 setTempOptimizedPrompt(data.optimized_prompt);
                 setShowPromptConfirm(true);
                 message.success('Prompt优化成功，请确认或编辑后保存');
+                
+                // 如果有评估结果，显示评估信息
+                if (data.evaluation) {
+                    const { scores } = data.evaluation;
+                    message.info(
+                        `优化评分：清晰度 ${scores.clarity}, 完整性 ${scores.completeness}, ` +
+                        `相关性 ${scores.relevance}, 一致性 ${scores.consistency}, ` +
+                        `结构性 ${scores.structure}`
+                    );
+                }
             } else {
-                throw new Error(data.detail || '优化失败');
+                throw new Error(data.message || '优化失败');
             }
         } catch (error) {
             console.error('优化prompt失败:', error);
-            message.error(error instanceof Error ? error.message : '优化prompt失败');
+            if (error instanceof Error) {
+                message.error(error.message);
+            } else {
+                message.error('优化prompt失败，请重试');
+            }
         } finally {
             setOptimizingPrompt(false);
         }
@@ -362,14 +382,9 @@ const PromptGenerator: React.FC = () => {
 
     const handleConfirmPrompt = async () => {
         try {
-            // 显示全屏加载
             setFullScreenLoading(true);
             setLoadingMessage('正在保存优化后的Prompt，请稍候...');
-            
-            // 添加保存状态，解决问题3
             setSavingPrompt(true);
-            
-            // 关闭确认对话框
             setShowPromptConfirm(false);
             
             const response = await fetch(`${API_BASE_URL}/api/confirm-prompt`, {
@@ -379,22 +394,25 @@ const PromptGenerator: React.FC = () => {
                 },
                 body: JSON.stringify({
                     optimized_prompt: tempOptimizedPrompt,
+                    optimization_result: optimizationResult
                 }),
             });
+            
             const data = await response.json();
+            
             if (data.status === 'success') {
                 setOptimizedPrompt(tempOptimizedPrompt);
                 message.success('优化后的Prompt已确认并保存到向量数据库！');
             } else {
-                message.error('保存失败：' + data.detail);
+                throw new Error(data.detail?.message || '保存失败');
             }
         } catch (error) {
-            message.error('保存失败：' + error);
+            console.error('保存失败:', error);
+            message.error(error instanceof Error ? error.message : '保存失败，请重试');
         } finally {
-            // 重置保存状态
             setSavingPrompt(false);
-            // 隐藏全屏加载
             setFullScreenLoading(false);
+            setOptimizationResult(null);
         }
     };
 

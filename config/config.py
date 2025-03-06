@@ -61,7 +61,15 @@ class Config:
         "timeout": 30,  # 超时时间（秒）
         "cache_ttl": 3600,  # 缓存生存时间（秒）
         "max_concurrent_requests": 5,  # 最大并发请求数
-        "slow_query_threshold": 5.0  # 降低慢查询阈值到5秒
+        "slow_query_threshold": 5.0,  # 降低慢查询阈值到5秒
+        # 嵌入缓存配置
+        "embedding_cache": {
+            "enabled": True,  # 启用嵌入缓存
+            "max_size": 10000,  # 最大缓存条目数
+            "ttl": 86400,  # 缓存生存时间（24小时）
+            "persist_interval": 300,  # 缓存持久化间隔（5分钟）
+            "compression": True  # 启用缓存压缩
+        }
     }
     
     # 模型配置
@@ -105,7 +113,14 @@ class Config:
         # RAG配置
         "search_type": "similarity",  # 改用简单相似度搜索以提高性能
         "lambda_mult": 0.7,
-        "rerank_top_k": 3
+        "rerank_top_k": 3,
+        # 嵌入缓存配置
+        "embedding_cache": {
+            "enabled": True,  # 启用嵌入缓存
+            "max_size": 5000,  # 最大缓存条目数
+            "ttl": 86400,  # 缓存生存时间（24小时）
+            "persist_interval": 300  # 缓存持久化间隔（5分钟）
+        }
     }
     
     # 文件处理配置

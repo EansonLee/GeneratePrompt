@@ -133,36 +133,78 @@ async def optimize_prompt(request: PromptRequest) -> Dict[str, Any]:
         logger.info(f"请求参数: {request.dict()}")
         
         if not request.prompt:
-            raise ValueError("提示词不能为空")
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "status": "error",
+                    "message": "提示词不能为空",
+                    "code": "EMPTY_PROMPT"
+                }
+            )
             
         # 等待向量存储就绪
         if not await vector_store.wait_until_ready():
             error = vector_store.get_initialization_error()
-            raise ValueError(f"向量存储未就绪: {error}")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "status": "error",
+                    "message": f"向量存储未就绪: {error}",
+                    "code": "VECTOR_STORE_NOT_READY"
+                }
+            )
             
         optimizer = PromptOptimizer(vector_store=vector_store)
         result = await optimizer.optimize(request.prompt)
         
-        # 确保返回的是字符串
-        if isinstance(result, dict):
-            optimized_prompt = result.get("optimized_prompt", "") or result.get("content", "")
-        else:
-            optimized_prompt = str(result)
+        # 检查优化结果
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "status": "error",
+                    "message": result.get("error", "优化失败"),
+                    "code": "OPTIMIZATION_FAILED"
+                }
+            )
+            
+        # 确保返回格式一致
+        optimized_prompt = result.get("optimized_prompt", "")
+        if not optimized_prompt:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "status": "error",
+                    "message": "优化结果为空",
+                    "code": "EMPTY_RESULT"
+                }
+            )
             
         logger.info("Prompt优化成功")
         
         return {
             "status": "success",
             "optimized_prompt": optimized_prompt,
-            "message": "Prompt优化成功"
+            "message": "Prompt优化成功",
+            "evaluation": result.get("evaluation", {}),
+            "context_info": result.get("context_info", {})
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         error_msg = str(e)
         logger.error(f"优化prompt失败: {error_msg}")
         if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
-        raise HTTPException(status_code=500, detail=error_msg)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": error_msg,
+                "code": "INTERNAL_ERROR"
+            }
+        )
 
 @app.post("/api/upload-context")
 async def upload_context(
@@ -273,12 +315,23 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
         
         if not request.optimized_prompt:
             raise ValueError("优化后的prompt内容不能为空")
-        
-        # 保存到向量数据库
-        vector_store.add_template(request.optimized_prompt)
-        
-        # 验证保存是否成功
-        if not vector_store.verify_insertion(request.optimized_prompt, "templates"):
+            
+        if not hasattr(request, 'optimization_result'):
+            # 如果没有优化结果，则只保存基本信息
+            vector_store.add_template(request.optimized_prompt)
+            success = vector_store.verify_insertion(request.optimized_prompt, "templates")
+        else:
+            # 如果有完整的优化结果，则保存详细信息
+            optimizer = PromptOptimizer(vector_store=vector_store)
+            success = await optimizer.save_optimization_result(
+                original_prompt=request.optimization_result.get('original_prompt', ''),
+                optimized_prompt=request.optimized_prompt,
+                evaluation=request.optimization_result.get('evaluation', {}),
+                context=request.optimization_result.get('context_info', {}),
+                optimization_time=request.optimization_result.get('optimization_time', 0)
+            )
+            
+        if not success:
             raise ValueError("优化后的prompt保存验证失败")
             
         logger.info("优化后的prompt保存成功")
@@ -292,7 +345,14 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
         logger.error(f"保存优化后的prompt失败: {error_msg}")
         if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
-        raise HTTPException(status_code=500, detail=error_msg)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": error_msg,
+                "code": "SAVE_FAILED"
+            }
+        )
 
 @app.get("/api/health")
 async def health_check():
@@ -331,4 +391,6 @@ async def get_vector_db_status() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=settings.DEBUG) 
+    import uvicorn
+    # 使用模块路径而不是文件路径
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=settings.DEBUG) 

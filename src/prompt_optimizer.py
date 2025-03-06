@@ -49,10 +49,7 @@ class PromptOptimizer:
             self.evaluation_prompt = ChatPromptTemplate.from_template(EVALUATION_TEMPLATE)
             
             # 初始化缓存管理器
-            self.cache = CacheManager(
-                max_size=settings.PROMPT_OPTIMIZATION_CONFIG["cache_size"],
-                ttl=settings.PROMPT_OPTIMIZATION_CONFIG["cache_ttl"]
-            )
+            self._init_cache_managers()
             
             # 初始化线程池
             self.thread_pool = ThreadPoolExecutor(
@@ -62,7 +59,32 @@ class PromptOptimizer:
             logger.info("优化器初始化成功")
             
         except Exception as e:
-            logger.error(f"初始化优化器失败: {str(e)}")
+            logger.error(f"优化器初始化失败: {str(e)}")
+            raise
+            
+    def _init_cache_managers(self):
+        """初始化缓存管理器"""
+        try:
+            # 优化结果缓存
+            self.optimization_cache = CacheManager(
+                max_size=settings.PROMPT_OPTIMIZATION_CONFIG.get("cache_size", 1000),
+                ttl=settings.PROMPT_OPTIMIZATION_CONFIG.get("cache_ttl", 86400)  # 1天
+            )
+            
+            # 相似提示词缓存
+            self.similar_prompts_cache = CacheManager(
+                max_size=settings.PROMPT_OPTIMIZATION_CONFIG.get("similar_cache_size", 500),
+                ttl=settings.PROMPT_OPTIMIZATION_CONFIG.get("similar_cache_ttl", 3600)  # 1小时
+            )
+            
+            # RAG结果缓存
+            self.rag_cache = CacheManager(
+                max_size=settings.PROMPT_OPTIMIZATION_CONFIG.get("rag_cache_size", 500),
+                ttl=settings.PROMPT_OPTIMIZATION_CONFIG.get("rag_cache_ttl", 3600)  # 1小时
+            )
+            
+        except Exception as e:
+            logger.error(f"初始化缓存管理器失败: {str(e)}")
             raise
             
     async def optimize_batch(
@@ -103,367 +125,353 @@ class PromptOptimizer:
                 
         return results
         
-    async def optimize(
-        self,
-        prompt: str,
-        context: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    async def optimize(self, prompt: str, context_files: Optional[List[str]] = None) -> Dict[str, Any]:
         """优化提示词
         
         Args:
             prompt: 原始提示词
-            context: 上下文信息
+            context_files: 上下文文件列表
             
         Returns:
-            优化结果字典
+            Dict[str, Any]: 优化结果
         """
         start_time = time.time()
         
         try:
-            # 检查缓存和历史记录
+            # 检查缓存
             cache_key = f"optimize_{prompt}"
-            cached_result = self.cache.get(cache_key)
+            cached_result = self.optimization_cache.get(cache_key)
             if cached_result:
                 logger.info("使用缓存的优化结果")
-                return json.loads(json.dumps(cached_result))
+                return cached_result
+                
+            # 获取相似的历史提示词
+            similar_prompts = await self._get_similar_prompts(prompt)
+            logger.info(f"找到 {len(similar_prompts)} 个相似的历史提示词")
             
-            # 获取最近的历史记录
-            latest_history = await self._get_latest_history(prompt)
+            # 获取项目上下文信息
+            project_context = await self._get_project_context()
+            logger.info("获取到项目上下文信息")
             
-            # 并行执行相似提示词搜索和项目上下文获取
-            similar_prompts_task = asyncio.create_task(
-                self.vector_store.similarity_search(
-                    prompt,
-                    k=min(3, settings.PROMPT_OPTIMIZATION_CONFIG.get("max_similar_prompts", 5))
-                )
-            )
-            project_context_task = asyncio.create_task(self._get_project_context())
+            # 使用RAG增强提示词
+            rag_result = await self._enhance_with_rag(prompt, context_files)
+            logger.info(f"RAG增强结果: 找到 {len(rag_result.get('contexts', []))} 个相关上下文")
             
-            # 等待所有任务完成
-            similar_prompts, project_context = await asyncio.gather(
-                similar_prompts_task,
-                project_context_task
-            )
+            # 组合优化上下文
+            optimization_context = {
+                "original_prompt": prompt,
+                "similar_prompts": similar_prompts,
+                "rag_context": rag_result,
+                "project_context": project_context,
+                "context_files": context_files or [],
+                "tech_stack": await self._get_tech_stack(),
+                "file_structure": await self._get_file_structure()
+            }
             
-            # 转换为可序列化的格式并限制大小
-            similar_prompts_json = []
-            total_length = 0
-            max_length_per_prompt = 500
+            # 生成优化后的提示词
+            optimized_prompt = await self._generate_optimized_prompt(optimization_context)
             
-            for doc in similar_prompts:
-                if total_length >= 1500:
-                    break
-                content = self._truncate_text(str(doc.page_content), max_length_per_prompt)
-                total_length += len(content)
-                similar_prompts_json.append({
-                    "content": content,
-                    "metadata": dict(doc.metadata)
-                })
+            # 评估优化结果
+            evaluation = await self._evaluate_prompt(optimized_prompt)
             
-            # 使用 RAG 增强上下文，包含历史对比信息
-            rag_result = await self._enhance_with_rag(
-                self._truncate_text(prompt, 500),
-                similar_prompts_json,
-                latest_history
-            )
-            
-            # 优化提示词
-            optimization_result = await self._optimize_prompt(
-                self._truncate_text(prompt, 500),
-                rag_result,
-                latest_history
-            )
-            
-            # 并行执行评估
-            evaluation = await self._evaluate_prompt(
-                self._truncate_text(optimization_result["content"], 1000)
-            )
-            
-            # 计算优化时间
-            optimization_time = time.time() - start_time
-            
-            # 构建最终结果
+            # 准备返回结果
             result = {
-                "original_prompt": str(prompt),
-                "optimized_prompt": str(optimization_result["content"]),
-                "rag_info": {
-                    "enhanced_context": str(rag_result["enhanced_context"]),
-                    "similar_prompts": similar_prompts_json[:2],
-                    "latest_history": latest_history
-                },
-                "evaluation": dict(evaluation),
-                "optimization_time": float(optimization_time)
-            }
-            
-            # 异步保存结果到缓存
-            asyncio.create_task(self._async_cache_result(cache_key, result))
-            
-            # 异步记录性能指标
-            asyncio.create_task(self._log_performance_metrics({
-                "operation": "optimize",
-                "prompt_length": len(prompt),
-                "optimization_time": optimization_time,
-                "cache_hit": False,
-                "similar_prompts_count": len(similar_prompts_json),
-                "scores": evaluation.get("scores", {})
-            }))
-            
-            return json.loads(json.dumps(result))
-            
-        except Exception as e:
-            logger.error(f"优化提示词失败: {str(e)}")
-            error_result = {
-                "error": str(e),
-                "original_prompt": str(prompt),
-                "optimized_prompt": str(prompt),
-                "evaluation": {
-                    "scores": {
-                        "clarity": 0.0,
-                        "completeness": 0.0,
-                        "relevance": 0.0,
-                        "consistency": 0.0,
-                        "structure": 0.0
-                    },
-                    "feedback": [f"优化失败: {str(e)}"],
-                    "suggestions": ["请检查输入并重试"]
+                "status": "success",
+                "original_prompt": prompt,
+                "optimized_prompt": optimized_prompt,
+                "evaluation": evaluation,
+                "optimization_time": time.time() - start_time,
+                "context_info": {
+                    "similar_prompts_count": len(similar_prompts),
+                    "rag_contexts_count": len(rag_result.get("contexts", [])),
+                    "project_context_available": bool(project_context)
                 }
             }
-            return json.loads(json.dumps(error_result))
-
-    async def _async_cache_result(self, key: str, value: Any):
-        """异步缓存结果
-        
-        Args:
-            key: 缓存键
-            value: 要缓存的值
-        """
-        try:
-            self.cache.set(key, value)
+            
+            # 缓存结果
+            self.optimization_cache.set(cache_key, result)
+            
+            # 记录性能指标
+            await self._log_performance_metrics(prompt, result)
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"缓存结果失败: {str(e)}")
-
-    def _truncate_text(self, text: str, max_length: int = 4000) -> str:
-        """截断文本到指定长度
+            error_msg = str(e)
+            logger.error(f"优化提示词失败: {error_msg}")
+            return {
+                "status": "error",
+                "original_prompt": prompt,
+                "optimized_prompt": prompt,
+                "error": error_msg,
+                "optimization_time": time.time() - start_time
+            }
+            
+    async def _get_similar_prompts(self, prompt: str) -> List[str]:
+        """获取相似的历史提示词
         
         Args:
-            text: 要截断的文本
-            max_length: 最大长度
+            prompt: 当前提示词
             
         Returns:
-            str: 截断后的文本
-        """
-        if len(text) <= max_length:
-            return text
-        return text[:max_length] + "...(已截断)"
-
-    async def _get_latest_history(self, prompt: str) -> Optional[Dict[str, Any]]:
-        """获取最近的历史记录
-        
-        Args:
-            prompt: 原始提示词
-            
-        Returns:
-            Optional[Dict[str, Any]]: 最近的历史记录
+            List[str]: 相似提示词列表
         """
         try:
-            # 使用相似度搜索找到最相似的历史记录
-            results = await self.vector_store.similarity_search(
+            # 检查缓存
+            cache_key = f"similar_{prompt}"
+            cached_result = self.similar_prompts_cache.get(cache_key)
+            if cached_result:
+                return cached_result
+                
+            # 从向量存储中搜索相似提示词
+            similar_docs = await self.vector_store.similarity_search(
                 prompt,
-                k=1,
-                filter_dict={"type": "prompt_history"},
-                search_type="similarity"
+                k=3,
+                filter_dict={"type": "prompt_history"}
             )
             
-            if results and len(results) > 0:
-                return {
-                    "content": results[0].page_content,
-                    "metadata": dict(results[0].metadata),
-                    "similarity_score": 0.95  # 假设相似度分数
-                }
-            return None
+            # 提取提示词内容
+            similar_prompts = [doc.page_content for doc in similar_docs]
+            
+            # 缓存结果
+            self.similar_prompts_cache.set(cache_key, similar_prompts)
+            
+            return similar_prompts
             
         except Exception as e:
-            logger.error(f"获取历史记录失败: {str(e)}")
-            return None
-
+            logger.error(f"获取相似提示词失败: {str(e)}")
+            return []
+            
     async def _enhance_with_rag(
         self,
         prompt: str,
-        similar_prompts: List[Dict[str, Any]],
-        latest_history: Optional[Dict[str, Any]] = None
+        context_files: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """使用RAG增强提示词
         
         Args:
             prompt: 原始提示词
-            similar_prompts: 相似的历史提示词
-            latest_history: 最近的历史记录
+            context_files: 上下文文件列表
             
         Returns:
             Dict[str, Any]: RAG增强结果
         """
         try:
-            # 限制相似提示词的数量和长度
-            truncated_prompts = []
-            total_length = 0
-            max_prompt_length = 500
+            # 检查缓存
+            cache_key = f"rag_{prompt}_{'-'.join(context_files or [])}"
+            cached_result = self.rag_cache.get(cache_key)
+            if cached_result:
+                return cached_result
+                
+            # 获取相关上下文
+            contexts = []
+            if context_files:
+                for file_path in context_files:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            contexts.append(f.read())
+                    except Exception as e:
+                        logger.warning(f"读取上下文文件失败: {str(e)}")
+                        
+            # 从向量存储中获取相关文档
+            relevant_docs = await self.vector_store.similarity_search(
+                prompt,
+                k=3,
+                filter_dict={"type": "context"}
+            )
             
-            # 如果有历史记录，优先使用
-            if latest_history:
-                truncated_prompts.append({
-                    "content": self._truncate_text(latest_history["content"], max_prompt_length),
-                    "metadata": latest_history["metadata"],
-                    "is_history": True
-                })
-                total_length += len(latest_history["content"])
+            # 合并上下文
+            all_contexts = contexts + [doc.page_content for doc in relevant_docs]
             
-            # 添加其他相似提示词
-            for prompt_dict in similar_prompts[:2]:
-                if total_length >= 1500:
-                    break
-                content = prompt_dict.get("content", "")
-                if content:
-                    truncated_content = self._truncate_text(content, max_prompt_length)
-                    truncated_prompts.append({
-                        "content": truncated_content,
-                        "metadata": prompt_dict.get("metadata", {}),
-                        "is_history": False
-                    })
-                    total_length += len(truncated_content)
-            
-            # 使用RAG模板生成增强上下文
-            rag_result = await self.llm.apredict_messages([{
-                "role": "system",
-                "content": self._truncate_text(SYSTEM_PROMPT, 500)
-            }, {
-                "role": "user",
-                "content": self.rag_prompt.format(
-                    original_prompt=self._truncate_text(prompt, 500),
-                    similar_prompts=json.dumps(truncated_prompts, ensure_ascii=False),
-                    latest_history=json.dumps(latest_history, ensure_ascii=False) if latest_history else "null"
-                )
-            }])
-            
-            return {
-                "enhanced_context": rag_result.content,
-                "similar_prompts": truncated_prompts,
-                "latest_history": latest_history,
-                "timestamp": datetime.now().isoformat()
+            # 使用RAG模板生成增强结果
+            rag_result = {
+                "contexts": all_contexts,
+                "file_contexts": contexts,
+                "retrieved_contexts": [doc.page_content for doc in relevant_docs]
             }
+            
+            # 缓存结果
+            self.rag_cache.set(cache_key, rag_result)
+            
+            return rag_result
             
         except Exception as e:
             logger.error(f"RAG增强失败: {str(e)}")
-            raise
-
-    async def _optimize_prompt(
-        self,
-        prompt: str,
-        rag_result: Dict[str, Any],
-        latest_history: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """优化提示词
-        
-        Args:
-            prompt: 原始提示词
-            rag_result: RAG增强结果
-            latest_history: 最近的历史记录
-            
-        Returns:
-            Dict[str, Any]: 优化结果
-        """
-        try:
-            # 获取项目上下文
-            project_context = await self._get_project_context()
-            
-            # 限制各部分内容长度
-            truncated_context = {
-                "tech_stack": self._truncate_text(json.dumps(project_context.get("tech_stack", {}), ensure_ascii=False), 500),
-                "file_structure": self._truncate_text(json.dumps(project_context.get("file_structure", {}), ensure_ascii=False), 500),
-                "output_paths": self._truncate_text(json.dumps(project_context.get("output_paths", {}), ensure_ascii=False), 500)
+            return {
+                "contexts": [],
+                "file_contexts": [],
+                "retrieved_contexts": []
             }
+
+    async def _get_tech_stack(self) -> Dict[str, Any]:
+        """获取项目技术栈信息"""
+        try:
+            results = await self.vector_store.similarity_search(
+                "技术栈 前端框架 后端框架 数据库",
+                k=3,
+                filter_dict={"type": "tech_stack"}
+            )
+            tech_stack = {
+                "frontend": [],
+                "backend": [],
+                "database": [],
+                "tools": []
+            }
+            for doc in results:
+                content = doc.page_content
+                metadata = doc.metadata
+                if "frontend" in metadata:
+                    tech_stack["frontend"].extend(metadata["frontend"])
+                if "backend" in metadata:
+                    tech_stack["backend"].extend(metadata["backend"])
+                if "database" in metadata:
+                    tech_stack["database"].extend(metadata["database"])
+                if "tools" in metadata:
+                    tech_stack["tools"].extend(metadata["tools"])
+            return tech_stack
+        except Exception as e:
+            logger.error(f"获取技术栈信息失败: {str(e)}")
+            return {}
+
+    async def _get_file_structure(self) -> Dict[str, Any]:
+        """获取项目文件结构信息"""
+        try:
+            results = await self.vector_store.similarity_search(
+                "项目结构 目录组织",
+                k=3,
+                filter_dict={"type": "file_structure"}
+            )
+            structure = {
+                "root_dir": "",
+                "src_dir": "",
+                "components_dir": "",
+                "pages_dir": "",
+                "api_dir": "",
+                "styles_dir": "",
+                "assets_dir": ""
+            }
+            for doc in results:
+                content = doc.page_content
+                metadata = doc.metadata
+                for key in structure.keys():
+                    if key in metadata:
+                        structure[key] = metadata[key]
+            return structure
+        except Exception as e:
+            logger.error(f"获取文件结构信息失败: {str(e)}")
+            return {}
+
+    async def _generate_optimized_prompt(self, optimization_context: Dict[str, Any]) -> str:
+        """生成优化后的提示词"""
+        try:
+            # 构建更详细的提示词模板
+            template = """请根据以下信息生成一个详细的优化提示词：
+
+原始需求：
+{original_prompt}
+
+技术栈信息：
+前端: {frontend_tech}
+后端: {backend_tech}
+数据库: {database_tech}
+工具链: {tools}
+
+文件结构：
+根目录: {root_dir}
+源码目录: {src_dir}
+组件目录: {components_dir}
+页面目录: {pages_dir}
+API目录: {api_dir}
+样式目录: {styles_dir}
+资源目录: {assets_dir}
+
+相似历史提示词：
+{similar_prompts}
+
+项目上下文：
+{project_context}
+
+RAG上下文：
+{rag_context}
+
+请生成一个优化后的提示词，确保包含：
+1. 详细的技术实现要求
+2. 具体的文件结构和组织方式
+3. 组件设计和数据流说明
+4. UI/UX设计指南
+5. API接口定义
+6. 数据模型设计
+7. 测试要求
+8. 性能考虑
+"""
             
-            # 使用优化模板生成优化后的提示词
-            optimization_result = await self.llm.apredict_messages([{
+            tech_stack = optimization_context.get("tech_stack", {})
+            file_structure = optimization_context.get("file_structure", {})
+            
+            messages = [{
                 "role": "system",
                 "content": self._truncate_text(SYSTEM_PROMPT, 500)
             }, {
                 "role": "user",
-                "content": self.optimization_prompt.format(
-                    original_prompt=self._truncate_text(prompt, 500),
-                    tech_stack=truncated_context["tech_stack"],
-                    file_structure=truncated_context["file_structure"],
-                    output_paths=truncated_context["output_paths"],
-                    similar_prompts=self._truncate_text(json.dumps(rag_result["similar_prompts"], ensure_ascii=False), 1000),
-                    rag_context=self._truncate_text(rag_result["enhanced_context"], 1000),
-                    latest_history=json.dumps(latest_history, ensure_ascii=False) if latest_history else "null"
+                "content": template.format(
+                    original_prompt=optimization_context["original_prompt"],
+                    frontend_tech=", ".join(tech_stack.get("frontend", [])),
+                    backend_tech=", ".join(tech_stack.get("backend", [])),
+                    database_tech=", ".join(tech_stack.get("database", [])),
+                    tools=", ".join(tech_stack.get("tools", [])),
+                    root_dir=file_structure.get("root_dir", ""),
+                    src_dir=file_structure.get("src_dir", ""),
+                    components_dir=file_structure.get("components_dir", ""),
+                    pages_dir=file_structure.get("pages_dir", ""),
+                    api_dir=file_structure.get("api_dir", ""),
+                    styles_dir=file_structure.get("styles_dir", ""),
+                    assets_dir=file_structure.get("assets_dir", ""),
+                    similar_prompts="\n".join(optimization_context.get("similar_prompts", [])),
+                    project_context=json.dumps(optimization_context.get("project_context", {}), ensure_ascii=False),
+                    rag_context=json.dumps(optimization_context.get("rag_context", {}), ensure_ascii=False)
                 )
-            }])
+            }]
             
-            return {
-                "content": optimization_result.content,
-                "timestamp": datetime.now().isoformat()
-            }
+            result = await self.llm.ainvoke(messages)
+            return result.content
             
         except Exception as e:
-            logger.error(f"优化提示词失败: {str(e)}")
-            return {
-                "content": prompt,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat()
-            }
+            logger.error(f"生成优化后的提示词失败: {str(e)}")
+            return optimization_context["original_prompt"]
 
     async def _evaluate_prompt(self, prompt: str) -> Dict[str, Any]:
-        """评估优化后的提示词
-        
-        Args:
-            prompt: 优化后的提示词
-            
-        Returns:
-            Dict[str, Any]: 评估结果
-        """
+        """评估优化后的提示词"""
         try:
-            evaluation_result = await self.llm.apredict_messages([{
+            messages = [{
                 "role": "system",
                 "content": SYSTEM_PROMPT
             }, {
                 "role": "user",
                 "content": self.evaluation_prompt.format(prompt=prompt)
-            }])
+            }]
             
-            # 解析评估结果
+            evaluation_result = await self.llm.ainvoke(messages)
+            
             try:
-                # 尝试从内容中提取JSON部分
+                # 提取并清理JSON
                 content = evaluation_result.content
-                # 查找第一个 { 和最后一个 } 的位置
-                start = content.find('{')
-                end = content.rfind('}') + 1
-                if start != -1 and end != -1:
-                    json_str = content[start:end]
+                # 查找JSON部分
+                json_pattern = r'\{[\s\S]*\}'
+                import re
+                json_match = re.search(json_pattern, content)
+                
+                if json_match:
+                    json_str = json_match.group()
+                    # 清理格式问题
+                    json_str = json_str.replace('\n', '').replace('    ', '')
                     result = json.loads(json_str)
                 else:
                     raise json.JSONDecodeError("No JSON found in content", content, 0)
                     
-            except json.JSONDecodeError:
-                logger.warning("评估结果解析失败，使用默认评估结果")
+            except json.JSONDecodeError as e:
+                logger.warning(f"评估结果解析失败: {str(e)}")
                 logger.debug(f"原始评估结果: {evaluation_result.content}")
-                result = {
-                    "scores": {
-                        "clarity": 0.7,
-                        "completeness": 0.7,
-                        "relevance": 0.7,
-                        "consistency": 0.7,
-                        "structure": 0.7
-                    },
-                    "feedback": ["提示词评估结果解析失败"],
-                    "suggestions": ["建议重新评估"],
-                    "directory_structure_analysis": {
-                        "completeness": "无法评估",
-                        "organization": "无法评估",
-                        "naming": "无法评估",
-                        "modularity": "无法评估",
-                        "improvements": ["建议重新评估目录结构"]
-                    }
-                }
+                result = self._get_default_evaluation()
             
             return {
                 "feedback": result.get("feedback", ["评估反馈解析失败"]),
@@ -486,34 +494,38 @@ class PromptOptimizer:
             
         except Exception as e:
             logger.error(f"评估提示词失败: {str(e)}")
-            return {
-                "feedback": [f"评估失败: {str(e)}"],
-                "improvement_suggestions": ["建议重新评估"],
-                "scores": {
-                    "clarity": 0.7,
-                    "completeness": 0.7,
-                    "relevance": 0.7,
-                    "consistency": 0.7,
-                    "structure": 0.7
-                },
-                "directory_structure_analysis": {
-                    "completeness": "评估失败",
-                    "organization": "评估失败",
-                    "naming": "评估失败",
-                    "modularity": "评估失败",
-                    "improvements": ["评估过程出错，请重试"]
-                }
+            return self._get_default_evaluation()
+
+    def _get_default_evaluation(self) -> Dict[str, Any]:
+        """获取默认的评估结果"""
+        return {
+            "feedback": ["评估过程出错"],
+            "improvement_suggestions": ["建议重新评估"],
+            "scores": {
+                "clarity": 0.7,
+                "completeness": 0.7,
+                "relevance": 0.7,
+                "consistency": 0.7,
+                "structure": 0.7
+            },
+            "directory_structure_analysis": {
+                "completeness": "评估失败",
+                "organization": "评估失败",
+                "naming": "评估失败",
+                "modularity": "评估失败",
+                "improvements": ["评估过程出错，请重试"]
             }
-            
-    async def _save_optimization_result(
+        }
+
+    async def save_optimization_result(
         self,
         original_prompt: str,
         optimized_prompt: str,
         evaluation: Dict[str, Any],
         context: Dict[str, Any],
         optimization_time: float
-    ) -> None:
-        """保存优化结果
+    ) -> bool:
+        """保存优化结果到向量数据库
         
         Args:
             original_prompt: 原始提示词
@@ -521,6 +533,9 @@ class PromptOptimizer:
             evaluation: 评估结果
             context: 上下文信息
             optimization_time: 优化耗时
+            
+        Returns:
+            bool: 是否保存成功
         """
         try:
             # 准备元数据
@@ -530,7 +545,8 @@ class PromptOptimizer:
                 "context": context,
                 "optimization_time": optimization_time,
                 "timestamp": datetime.now().isoformat(),
-                "model_version": settings.OPENAI_MODEL
+                "model_version": settings.OPENAI_MODEL,
+                "type": "prompt_history"  # 添加类型标记
             }
             
             # 保存到向量存储
@@ -539,9 +555,12 @@ class PromptOptimizer:
                 metadatas=[metadata]
             )
             
+            logger.info("优化结果已成功保存到向量数据库")
+            return True
+            
         except Exception as e:
             logger.error(f"保存优化结果失败: {str(e)}")
-            raise
+            return False
             
     @staticmethod
     def _adjust_batch_size(avg_time: float, current_size: int) -> int:
@@ -567,19 +586,20 @@ class PromptOptimizer:
             
         return new_size
         
-    async def _log_performance_metrics(self, metrics: Dict[str, Any]):
+    async def _log_performance_metrics(self, prompt: str, result: Dict[str, Any]):
         """记录性能指标
         
         Args:
-            metrics: 性能指标数据
+            prompt: 原始提示词
+            result: 优化结果
         """
         try:
             # 这里可以实现具体的指标记录逻辑
             # 例如：发送到监控系统、写入日志等
-            if metrics.get("optimization_time", 0) > settings.PROMPT_OPTIMIZATION_CONFIG["slow_query_threshold"]:
-                logger.warning(f"检测到慢查询: {json.dumps(metrics, ensure_ascii=False)}")
+            if result.get("optimization_time", 0) > settings.PROMPT_OPTIMIZATION_CONFIG["slow_query_threshold"]:
+                logger.warning(f"检测到慢查询: {json.dumps(result, ensure_ascii=False)}")
                 
-            logger.info(f"性能指标: {json.dumps(metrics, ensure_ascii=False)}")
+            logger.info(f"性能指标: {json.dumps(result, ensure_ascii=False)}")
             
         except Exception as e:
             logger.error(f"记录性能指标失败: {str(e)}")
@@ -624,4 +644,24 @@ class PromptOptimizer:
             filter_dict={"type": "prompt_history"},
             search_type=search_type
         )
-        return [doc.page_content for doc in results] 
+        return [doc.page_content for doc in results]
+
+    def _truncate_text(self, text: str, max_length: int) -> str:
+        """截断文本到指定长度
+        
+        Args:
+            text: 要截断的文本
+            max_length: 最大长度
+            
+        Returns:
+            str: 截断后的文本
+        """
+        if not text:
+            return ""
+            
+        if len(text) <= max_length:
+            return text
+            
+        # 保留前后文，中间用省略号
+        half_length = (max_length - 3) // 2
+        return f"{text[:half_length]}...{text[-half_length:]}" 
