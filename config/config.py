@@ -123,6 +123,30 @@ class Config:
         }
     }
     
+    # 设计图Prompt生成配置
+    DESIGN_PROMPT_CONFIG: Dict[str, Any] = {
+        "model_name": os.getenv("DESIGN_PROMPT_MODEL", "gpt-4"),
+        "temperature": safe_float(os.getenv("DESIGN_PROMPT_TEMPERATURE", "0.5"), 0.5),
+        "max_tokens": safe_int(os.getenv("DESIGN_PROMPT_MAX_TOKENS", "3000"), 3000),
+        # 支持的技术栈
+        "supported_tech_stacks": ["Android", "iOS", "Flutter"],
+        # 支持的图片格式
+        "supported_image_formats": [".jpg", ".jpeg", ".png", ".webp"],
+        # 最大图片大小 (5MB)
+        "max_image_size": safe_int(os.getenv("MAX_IMAGE_SIZE", "5242880"), 5242880),
+        # RAG配置
+        "rag_methods": ["similarity", "mmr", "hybrid"],
+        "default_rag_method": "similarity",
+        "default_retriever_top_k": 3,
+        # Agent配置
+        "agent_types": ["ReActAgent", "ConversationalRetrievalAgent"],
+        "default_agent_type": "ReActAgent",
+        "default_context_window_size": 4000,
+        # 缓存配置
+        "cache_enabled": True,
+        "cache_ttl": 86400,  # 24小时
+    }
+    
     # 文件处理配置
     FILE_PROCESSING_CONFIG: Dict[str, Any] = {
         "supported_extensions": [
@@ -264,6 +288,14 @@ class Config:
    - 文档目录
    - 构建输出目录
 """
+
+    def get_logging_config(self) -> Dict[str, Any]:
+        """获取日志配置"""
+        return {
+            "level": self.LOG_LEVEL,
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S"
+        }
 
 # 创建全局配置实例
 settings = Config() 

@@ -18,6 +18,7 @@ interface ProcessingStatus {
     total: number;
     processed: number;
     status: 'idle' | 'processing' | 'completed' | 'error';
+    message?: string;
 }
 
 // 自定义全屏加载图标
@@ -286,6 +287,12 @@ const PromptGenerator: React.FC = () => {
                 method: 'POST',
                 body: formData,
             });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || '上传失败');
+            }
+            
             const data = await response.json();
             if (data.status === 'success') {
                 // 更新文件列表
@@ -307,13 +314,17 @@ const PromptGenerator: React.FC = () => {
                 }
             } else {
                 setProcessingStatus(prev => ({ ...prev, status: 'error' }));
-                message.error(`${file.name} 上传失败！${data.detail}`);
+                message.error(`${file.name} 上传失败！${data.detail || '未知错误'}`);
             }
         } catch (error) {
-            setProcessingStatus(prev => ({ ...prev, status: 'error' }));
-            message.error(`${file.name} 上传失败：${error}`);
+            console.error('上传文件失败:', error);
+            setProcessingStatus(prev => ({ 
+                ...prev, 
+                status: 'error',
+                message: error instanceof Error ? error.message : '上传失败'
+            }));
+            message.error(error instanceof Error ? error.message : '上传失败，请稍后重试');
         } finally {
-            // 重要：立即重置上传状态
             setIsUploading(false);
             
             // 3秒后清除完成状态
@@ -336,9 +347,17 @@ const PromptGenerator: React.FC = () => {
     const beforeUpload = (file: UploadFile) => {
         const extension = `.${file.name.split('.').pop()?.toLowerCase()}`;
         if (!SUPPORTED_EXTENSIONS.includes(extension)) {
-            message.error(`不支持的文件类型：${extension}`);
+            message.error(`不支持的文件类型：${extension}，支持的类型：${SUPPORTED_EXTENSIONS.join(', ')}`);
             return false;
         }
+        
+        // 检查文件大小 (10MB)
+        const isLessThan10M = (file as any).size / 1024 / 1024 < 10;
+        if (!isLessThan10M) {
+            message.error('文件大小不能超过10MB');
+            return false;
+        }
+        
         return true;
     };
 

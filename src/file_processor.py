@@ -14,6 +14,7 @@ from langchain_community.document_loaders import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from datetime import datetime
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -622,15 +623,32 @@ class FileProcessor:
             Path: 保存的文件路径
         """
         try:
-            file_path = self.upload_dir / file.filename
+            # 确保上传目录存在
+            self.upload_dir.mkdir(parents=True, exist_ok=True)
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 生成唯一的临时文件名
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_filename = f"{timestamp}_{uuid.uuid4().hex}_{file.filename}"
+            file_path = self.temp_dir / unique_filename
             
             # 写入文件
-            with file_path.open("wb") as buffer:
+            try:
                 content = await file.read()
-                buffer.write(content)
+                with open(file_path, "wb") as buffer:
+                    buffer.write(content)
+                logger.info(f"文件已保存到临时目录: {file_path}")
+                return file_path
+            except Exception as e:
+                logger.error(f"写入文件失败: {str(e)}", exc_info=True)
+                if file_path.exists():
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"清理失败的临时文件: {file_path}")
+                    except Exception as cleanup_error:
+                        logger.warning(f"清理临时文件失败: {str(cleanup_error)}")
+                raise ValueError(f"保存文件失败: {str(e)}")
                 
-            return file_path
-            
         except Exception as e:
-            logger.error(f"保存上传文件失败: {str(e)}")
-            raise 
+            logger.error(f"保存上传文件失败: {str(e)}", exc_info=True)
+            raise ValueError(f"保存上传文件失败: {str(e)}") 

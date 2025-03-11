@@ -1,5 +1,5 @@
 import React from 'react';
-import PromptGenerator from './components/PromptGenerator';
+import MainPage from './components/MainPage';
 import { ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 
@@ -7,7 +7,7 @@ const App: React.FC = () => {
   return (
     <ConfigProvider locale={zhCN}>
       <div className="App">
-        <PromptGenerator />
+        <MainPage />
       </div>
     </ConfigProvider>
   );

@@ -4,15 +4,17 @@ import logging
 import asyncio
 from typing import Dict, Any, Optional, List
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 
 from config.config import settings
 from src.prompt_optimizer import PromptOptimizer
 from src.utils.vector_store import VectorStore
 from src.utils.rag_manager import RAGManager
+from src.utils.design_image_processor import DesignImageProcessor
+from src.agents.design_prompt_agent import DesignPromptAgent
 
 # 配置日志
 logging.basicConfig(**settings.get_logging_config())
@@ -37,6 +39,8 @@ app.add_middleware(
 vector_store = VectorStore()
 optimizer = PromptOptimizer(vector_store=vector_store)
 rag_manager = RAGManager(vector_store=vector_store)
+design_image_processor = DesignImageProcessor(vector_store=vector_store)
+design_prompt_agent = DesignPromptAgent(vector_store=vector_store, design_processor=design_image_processor)
 
 # 请求模型
 class OptimizePromptRequest(BaseModel):
@@ -55,6 +59,23 @@ class ProcessFileRequest(BaseModel):
     """处理文件请求"""
     file_path: str
     file_type: Optional[str] = None
+
+class GenerateDesignPromptRequest(BaseModel):
+    """生成设计图Prompt请求"""
+    tech_stack: str = Field(..., description="技术栈 (Android/iOS/Flutter)")
+    design_image_id: str = Field(..., description="设计图ID")
+    design_image_path: str = Field(..., description="设计图路径")
+    rag_method: str = Field(settings.DESIGN_PROMPT_CONFIG["default_rag_method"], description="RAG方法")
+    retriever_top_k: int = Field(settings.DESIGN_PROMPT_CONFIG["default_retriever_top_k"], description="检索结果数量")
+    agent_type: str = Field(settings.DESIGN_PROMPT_CONFIG["default_agent_type"], description="Agent类型")
+    temperature: float = Field(settings.DESIGN_PROMPT_CONFIG["temperature"], description="温度")
+    context_window_size: int = Field(settings.DESIGN_PROMPT_CONFIG["default_context_window_size"], description="上下文窗口大小")
+
+class SaveUserModifiedPromptRequest(BaseModel):
+    """保存用户修改后的Prompt请求"""
+    prompt: str = Field(..., description="修改后的Prompt")
+    tech_stack: str = Field(..., description="技术栈")
+    design_image_id: str = Field(..., description="设计图ID")
 
 # API路由
 @app.post("/api/optimize")
@@ -171,6 +192,203 @@ async def get_stats():
         
     except Exception as e:
         logger.error(f"获取统计信息失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/design/upload")
+async def upload_design_image(
+    file: UploadFile = File(...),
+    tech_stack: str = Form(...),
+    background_tasks: BackgroundTasks = None
+):
+    """上传设计图
+    
+    Args:
+        file: 上传的设计图文件
+        tech_stack: 技术栈 (Android/iOS/Flutter)
+        background_tasks: 后台任务
+        
+    Returns:
+        Dict[str, Any]: 上传结果
+    """
+    try:
+        # 1. 验证技术栈
+        if tech_stack not in settings.DESIGN_PROMPT_CONFIG["supported_tech_stacks"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"不支持的技术栈: {tech_stack}，支持的技术栈: {settings.DESIGN_PROMPT_CONFIG['supported_tech_stacks']}"
+            )
+        
+        # 2. 验证文件格式
+        file_ext = Path(file.filename).suffix.lower()
+        if file_ext not in settings.DESIGN_PROMPT_CONFIG["supported_image_formats"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"不支持的文件格式: {file_ext}，支持的格式: {settings.DESIGN_PROMPT_CONFIG['supported_image_formats']}"
+            )
+        
+        # 3. 读取文件内容
+        contents = await file.read()
+        
+        # 4. 验证文件大小
+        if len(contents) > settings.DESIGN_PROMPT_CONFIG["max_image_size"]:
+            max_size_mb = settings.DESIGN_PROMPT_CONFIG["max_image_size"] / (1024 * 1024)
+            raise HTTPException(
+                status_code=400, 
+                detail=f"文件过大，最大支持 {max_size_mb}MB"
+            )
+        
+        # 5. 处理设计图
+        result = await design_image_processor.process_image(
+            image_data=contents,
+            filename=file.filename,
+            tech_stack=tech_stack
+        )
+        
+        if not result.get("success", False):
+            raise HTTPException(status_code=500, detail=result.get("error", "处理设计图失败"))
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"上传设计图失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/design/generate")
+async def generate_design_prompt(request: GenerateDesignPromptRequest):
+    """生成设计图Prompt
+    
+    Args:
+        request: 生成请求
+        
+    Returns:
+        Dict[str, Any]: 生成结果
+    """
+    try:
+        # 1. 验证技术栈
+        if request.tech_stack not in settings.DESIGN_PROMPT_CONFIG["supported_tech_stacks"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"不支持的技术栈: {request.tech_stack}，支持的技术栈: {settings.DESIGN_PROMPT_CONFIG['supported_tech_stacks']}"
+            )
+        
+        # 2. 验证RAG方法
+        if request.rag_method not in settings.DESIGN_PROMPT_CONFIG["rag_methods"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"不支持的RAG方法: {request.rag_method}，支持的方法: {settings.DESIGN_PROMPT_CONFIG['rag_methods']}"
+            )
+        
+        # 3. 验证Agent类型
+        if request.agent_type not in settings.DESIGN_PROMPT_CONFIG["agent_types"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"不支持的Agent类型: {request.agent_type}，支持的类型: {settings.DESIGN_PROMPT_CONFIG['agent_types']}"
+            )
+        
+        # 4. 生成Prompt
+        result = await design_prompt_agent.generate_design_prompt(
+            tech_stack=request.tech_stack,
+            design_image_id=request.design_image_id,
+            design_image_path=request.design_image_path,
+            rag_method=request.rag_method,
+            retriever_top_k=request.retriever_top_k,
+            agent_type=request.agent_type,
+            temperature=request.temperature,
+            context_window_size=request.context_window_size
+        )
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"生成设计图Prompt失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/design/save")
+async def save_user_modified_prompt(request: SaveUserModifiedPromptRequest):
+    """保存用户修改后的Prompt
+    
+    Args:
+        request: 保存请求
+        
+    Returns:
+        Dict[str, Any]: 保存结果
+    """
+    try:
+        # 保存用户修改后的Prompt
+        result = await design_prompt_agent.save_user_modified_prompt(
+            prompt=request.prompt,
+            tech_stack=request.tech_stack,
+            design_image_id=request.design_image_id
+        )
+        
+        if not result.get("success", False):
+            raise HTTPException(status_code=500, detail=result.get("error", "保存Prompt失败"))
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"保存用户修改后的Prompt失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/design/tech-stacks")
+async def get_tech_stacks():
+    """获取支持的技术栈
+    
+    Returns:
+        Dict[str, List[str]]: 支持的技术栈
+    """
+    return {
+        "tech_stacks": settings.DESIGN_PROMPT_CONFIG["supported_tech_stacks"]
+    }
+
+@app.get("/api/design/rag-methods")
+async def get_rag_methods():
+    """获取支持的RAG方法
+    
+    Returns:
+        Dict[str, List[str]]: 支持的RAG方法
+    """
+    return {
+        "rag_methods": settings.DESIGN_PROMPT_CONFIG["rag_methods"]
+    }
+
+@app.get("/api/design/agent-types")
+async def get_agent_types():
+    """获取支持的Agent类型
+    
+    Returns:
+        Dict[str, List[str]]: 支持的Agent类型
+    """
+    return {
+        "agent_types": settings.DESIGN_PROMPT_CONFIG["agent_types"]
+    }
+
+@app.get("/api/vector-db-status")
+async def get_vector_db_status():
+    """获取向量数据库状态
+    
+    Returns:
+        Dict[str, Any]: 向量数据库状态信息
+    """
+    try:
+        return {
+            "status": "ready" if vector_store.is_initialized() else "initializing",
+            "error": vector_store.get_initialization_error(),
+            "is_ready": vector_store.is_initialized(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"获取向量数据库状态失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 工具函数

@@ -232,9 +232,29 @@ async def upload_context(
                 detail=error_msg
             )
             
+        # 检查文件大小
+        file_size = 0
+        file_content = await file.read()
+        file_size = len(file_content)
+        if file_size > settings.FILE_PROCESSING_CONFIG["max_file_size"]:
+            error_msg = f"文件大小超过限制: {file_size} > {settings.FILE_PROCESSING_CONFIG['max_file_size']}"
+            logger.warning(error_msg)
+            raise HTTPException(
+                status_code=400,
+                detail=error_msg
+            )
+            
         # 保存上传的文件
-        file_path = await file_processor.save_upload_file(file)
-        logger.info(f"文件已保存到: {file_path}")
+        try:
+            file_path = await file_processor.save_upload_file(file)
+            logger.info(f"文件已保存到: {file_path}")
+        except Exception as e:
+            error_msg = f"保存文件失败: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=error_msg
+            )
         
         try:
             # 处理文件
@@ -245,17 +265,27 @@ async def upload_context(
                 "file_name": file.filename,
                 "processing_result": result
             }
+        except Exception as e:
+            error_msg = f"处理文件失败: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=error_msg
+            )
         finally:
             # 清理上传的文件
             if file_path.exists():
-                os.remove(file_path)
-                logger.info(f"临时文件已删除: {file_path}")
+                try:
+                    os.remove(file_path)
+                    logger.info(f"临时文件已删除: {file_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败: {file_path}, 错误: {str(e)}")
                 
     except HTTPException:
         raise
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"处理上传文件失败: {error_msg}")
+        logger.error(f"处理上传文件失败: {error_msg}", exc_info=True)
         if settings.DEBUG:
             logger.debug("详细错误信息:", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)

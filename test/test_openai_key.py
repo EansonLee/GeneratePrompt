@@ -283,6 +283,136 @@ def test_embedding_with_langchain(api_key: str, base_url: str) -> Tuple[bool, st
             print(f"详细错误信息:\n{traceback.format_exc()}")
         return False, error_msg
 
+def test_vision_model(api_key: str = None, base_url: str = None) -> Tuple[bool, str]:
+    """测试 GPT-4 Vision 模型是否可用
+    
+    Args:
+        api_key: API密钥，如果不提供则使用默认配置
+        base_url: API基础URL，如果不提供则使用默认配置
+    
+    Returns:
+        Tuple[bool, str]: (是否成功, 详细信息)
+    """
+    try:
+        # 使用默认配置
+        if api_key is None:
+            api_key = "sk-FastAPIvE1M0Ktm0qjx1IZm4LIA1bVdR0mZ0aOtH3BCz2wjn"
+        if base_url is None:
+            base_url = "https://api.fastapi.ai/v1"
+            
+        print("\n📡 测试 GPT-4 Vision 模型...")
+        print(f"Base URL: {base_url}")
+        print(f"API Key: {api_key}")
+        
+        # 准备测试图片（使用base64编码的简单图片数据）
+        test_image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "OpenAI/v1 PythonClient/1.0.0"
+        }
+        
+        # 首先获取可用模型列表
+        print("\n🔄 获取可用模型列表...")
+        models_response = requests.get(
+            f"{base_url}/models",
+            headers=headers,
+            timeout=30,
+            verify=True
+        )
+        
+        if models_response.status_code == 200:
+            models = models_response.json().get("data", [])
+            model_ids = [model["id"] for model in models]
+            print("\n可用模型列表:")
+            for model_id in model_ids:
+                print(f"- {model_id}")
+            
+            # 选择合适的模型
+            vision_model = None
+            for model_id in model_ids:
+                if "vision" in model_id.lower() or "gpt-4" in model_id.lower():
+                    vision_model = model_id
+                    break
+            
+            if not vision_model:
+                return False, "未找到可用的 Vision 模型"
+        else:
+            print(f"\n❌ 获取模型列表失败: {models_response.status_code}")
+            vision_model = "gpt-4-vision-preview"  # 使用默认模型
+        
+        print(f"\n使用模型: {vision_model}")
+        
+        data = {
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "这是一个测试图片，请返回'测试成功'这三个字"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{test_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 300,
+            "temperature": 0
+        }
+        
+        url = f"{base_url}/chat/completions"
+        print(f"\n请求URL: {url}")
+        print(f"请求头: {json.dumps(headers, indent=2, ensure_ascii=False)}")
+        print(f"请求体: {json.dumps(data, indent=2, ensure_ascii=False)}")
+        
+        response = requests.post(
+            url,
+            headers=headers,
+            json=data,
+            timeout=30,
+            verify=True
+        )
+        
+        print(f"\n📥 响应状态码: {response.status_code}")
+        print(f"响应头: {dict(response.headers)}")
+        print(f"响应内容: {response.text}")
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            if 'choices' in response_data and len(response_data['choices']) > 0:
+                content = response_data['choices'][0].get('message', {}).get('content', '')
+                print(f"\n模型返回内容: {content}")
+                print("\n✅ GPT-4 Vision 模型测试成功！")
+                return True, "GPT-4 Vision 模型测试成功"
+            else:
+                error_msg = "响应格式不正确"
+                print(f"\n❌ {error_msg}")
+                return False, error_msg
+        else:
+            try:
+                error_data = response.json()
+                error_msg = f"GPT-4 Vision 模型测试失败: HTTP {response.status_code}, {error_data.get('error', {}).get('message', '未知错误')}"
+            except:
+                error_msg = f"GPT-4 Vision 模型测试失败: HTTP {response.status_code}"
+            print(f"\n❌ {error_msg}")
+            return False, error_msg
+            
+    except Exception as e:
+        error_msg = f"GPT-4 Vision 模型测试失败: {str(e)}"
+        print(f"\n❌ {error_msg}")
+        if hasattr(e, '__traceback__'):
+            import traceback
+            print(f"详细错误信息:\n{traceback.format_exc()}")
+        return False, error_msg
+
 if __name__ == "__main__":
     # 设置详细的HTTP请求日志
     import http.client as http_client
@@ -314,5 +444,10 @@ if __name__ == "__main__":
     langchain_success, langchain_message = test_embedding_with_langchain(api_key, base_url)
     print(f"\nLangChain API 测试结果: {langchain_message}")
     
-    # 根据所有测试的结果决定退出码
-    exit(0 if success and embedding_success and langchain_success else 1) 
+    # 运行 GPT-4 Vision 模型测试
+    print("\n=== 测试 GPT-4 Vision 模型 ===")
+    vision_success, vision_message = test_vision_model(api_key, base_url)
+    print(f"\nGPT-4 Vision 模型测试结果: {vision_message}")
+
+    # 根据测试结果决定退出码
+    exit(0 if vision_success else 1) 

@@ -9,6 +9,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from config.config import settings
 from src.utils.vector_store import VectorStore
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,16 @@ class RAGManager:
         try:
             self.vector_store = vector_store or VectorStore()
             
+            # 等待向量存储初始化完成
+            if not self.vector_store.is_initialized():
+                logger.warning("等待向量存储初始化...")
+                if not asyncio.run(self.vector_store.wait_until_ready(timeout=30)):
+                    raise ValueError("向量存储初始化超时")
+            
+            # 验证必要的存储是否存在
+            if not hasattr(self.vector_store, 'context_store'):
+                raise ValueError("向量存储缺少context_store")
+            
             # 初始化文本分割器
             self.text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=settings.VECTOR_STORE_CONFIG["chunk_size"],
@@ -32,9 +43,7 @@ class RAGManager:
             )
             
             # 初始化检索器
-            self.retriever = ParentDocumentRetriever(
-                vectorstore=self.vector_store.prompts_store,
-                text_splitter=self.text_splitter,
+            self.retriever = self.vector_store.context_store.as_retriever(
                 search_kwargs={"k": 5}
             )
             
@@ -124,7 +133,7 @@ class RAGManager:
         relevance = []
         
         for doc in docs:
-            score = self.vector_store.prompts_store.similarity_search_with_score(
+            score = self.vector_store.context_store.similarity_search_with_score(
                 query=prompt,
                 k=1,
                 filter={"id": doc.metadata.get("id")}
