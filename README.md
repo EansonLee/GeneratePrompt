@@ -275,6 +275,9 @@ python scripts/start.py  # 直接启动服务
    cd src/api
    uvicorn main:app --reload --port 8000
    
+   # 后端调试（支持热重载）
+   python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+
    # 前端调试（支持热重载）
    cd frontend
    npm start
