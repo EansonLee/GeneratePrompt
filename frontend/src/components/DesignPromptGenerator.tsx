@@ -1,15 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
-  Button, Card, Input, Upload, message, Select, Slider, Tabs, 
-  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse 
+  Button, Card, Input, Upload, message, Select, Slider, 
+  Space, Alert, Spin, Typography, Modal, Form, Divider, Collapse, Empty 
 } from 'antd';
-import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined } from '@ant-design/icons';
+import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, CopyOutlined, CloseOutlined } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd/es/upload/interface';
 import { API_BASE_URL } from '../config';
+import ReactMarkdown from 'react-markdown';
 
 const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
-const { TabPane } = Tabs;
 const { Option } = Select;
 
 // 支持的图片类型
@@ -29,6 +29,7 @@ const AGENT_TYPES = ['ReActAgent', 'ConversationalRetrievalAgent'];
 interface ProcessingStatus {
   status: 'idle' | 'processing' | 'completed' | 'error';
   message?: string;
+  canRetry?: boolean;
 }
 
 // 自定义全屏加载图标
@@ -83,6 +84,9 @@ const DesignPromptGenerator: React.FC = () => {
   // 历史Prompt状态
   const [hasHistoryContext, setHasHistoryContext] = useState<boolean>(false);
   const [historyPrompts, setHistoryPrompts] = useState<any[]>([]);
+  
+  // 添加设计分析状态
+  const [designAnalysis, setDesignAnalysis] = useState<any>({});
   
   // 上传配置
   const uploadProps: UploadProps = {
@@ -179,20 +183,24 @@ const DesignPromptGenerator: React.FC = () => {
   
   // 生成Prompt
   const handleGeneratePrompt = async () => {
-    if (!uploadResult) {
-      message.error('请先上传设计图');
-      return;
-    }
-    
     try {
+      if (!uploadResult) {
+        message.error('请先上传设计图');
+        return;
+      }
+
       setGenerationStatus({ status: 'processing' });
       setFullScreenLoading(true);
       setLoadingMessage('正在生成Prompt...');
+      setGeneratedPrompt('');
       
+      const startTime = Date.now();
+      
+      // 准备请求数据
       const requestData = {
         tech_stack: techStack,
         design_image_id: uploadResult.image_id,
-        design_image_path: uploadResult.image_path,
+        design_image_path: uploadResult.file_path,
         rag_method: ragMethod,
         retriever_top_k: retrieverTopK,
         agent_type: agentType,
@@ -200,9 +208,8 @@ const DesignPromptGenerator: React.FC = () => {
         context_window_size: contextWindowSize,
         prompt: "设计图Prompt生成请求"
       };
-      
-      console.log('发送请求数据:', JSON.stringify(requestData, null, 2));
-      
+
+      // 发送请求
       const response = await fetch(`${API_BASE_URL}/api/design/generate`, {
         method: 'POST',
         headers: {
@@ -214,28 +221,94 @@ const DesignPromptGenerator: React.FC = () => {
         cache: 'no-cache'
       });
       
+      // 计算耗时
+      const endTime = Date.now();
+      const timeUsed = (endTime - startTime) / 1000;
+
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error('请求失败:', response.status, response.statusText, errorText);
-        throw new Error(`生成失败: ${response.status} ${response.statusText}`);
+        let errorMessage = `生成失败: ${response.status} ${response.statusText}`;
+        
+        try {
+          const errorData = await response.json();
+          
+          // 检查是否是OpenAI API错误
+          if (response.status === 503 && errorData.detail && errorData.detail.error_type === 'openai_api_error') {
+            errorMessage = errorData.detail.message || 'OpenAI API服务器暂时不可用，请稍后重试';
+            message.error(errorMessage);
+            
+            // 设置重试按钮
+            setGenerationStatus({ 
+              status: 'error', 
+              message: errorMessage,
+              canRetry: true
+            });
+          } else if (errorData.detail) {
+            errorMessage = typeof errorData.detail === 'string' 
+              ? errorData.detail 
+              : JSON.stringify(errorData.detail);
+            
+            setGenerationStatus({ 
+              status: 'error', 
+              message: errorMessage
+            });
+          }
+        } catch (jsonError) {
+          // 如果无法解析JSON，则使用文本响应
+          const errorText = await response.text();
+          errorMessage = `${errorMessage}\n${errorText}`;
+          setGenerationStatus({ 
+            status: 'error', 
+            message: errorMessage
+          });
+        }
+        
+        throw new Error(errorMessage);
+      }
+
+      const data = await response.json();
+      
+      // 检查是否来自缓存
+      const fromCache = data.from_cache || false;
+      
+      // 检查是否是兜底prompt
+      const isFallbackPrompt = data.is_fallback_prompt || false;
+      
+      // 显示成功消息，包含耗时信息
+      if (fromCache) {
+        message.success(`Prompt生成成功 (从缓存获取)，耗时: ${timeUsed.toFixed(2)}秒`);
+      } else if (isFallbackPrompt) {
+        message.warning(`生成Prompt失败，已使用设计图分析结果作为兜底方案，耗时: ${timeUsed.toFixed(2)}秒`);
+      } else {
+        message.success(`Prompt生成成功，耗时: ${timeUsed.toFixed(2)}秒`);
       }
       
-      const result = await response.json();
-      console.log('接收到响应:', JSON.stringify(result, null, 2));
-      setGeneratedPrompt(result.generated_prompt || result.prompt);
-      setEditedPrompt(result.generated_prompt || result.prompt);
-      setHasHistoryContext(result.has_history_context);
-      setHistoryPrompts(result.history_prompts || []);
-      setGenerationStatus({ status: 'completed' });
-      message.success('Prompt生成成功');
+      setGeneratedPrompt(data.generated_prompt || '');
+      setEditedPrompt(data.generated_prompt || '');
+      setHasHistoryContext(data.has_history_context || false);
+      setHistoryPrompts(data.history_prompts || []);
+      setDesignAnalysis(data.design_analysis || {});
       
-    } catch (error) {
+      // 如果是兜底prompt，设置状态为警告
+      if (isFallbackPrompt) {
+        setGenerationStatus({ 
+          status: 'completed',
+          message: '由于生成失败，使用了设计图分析结果作为兜底方案。您可以编辑此Prompt或重试。',
+          canRetry: true
+        });
+      } else {
+        setGenerationStatus({ status: 'completed' });
+      }
+    } catch (error: any) {
       console.error('生成Prompt失败:', error);
-      setGenerationStatus({ 
-        status: 'error', 
-        message: error instanceof Error ? error.message : '生成失败' 
-      });
-      message.error(`生成Prompt失败: ${error instanceof Error ? error.message : '未知错误'}`);
+      
+      // 如果状态已经设置为错误，则不再更新
+      if (generationStatus.status !== 'error') {
+        setGenerationStatus({ 
+          status: 'error', 
+          message: error instanceof Error ? error.message : '生成失败' 
+        });
+        message.error(`生成Prompt失败: ${error instanceof Error ? error.message : '未知错误'}`);
+      }
     } finally {
       setFullScreenLoading(false);
     }
@@ -279,7 +352,8 @@ const DesignPromptGenerator: React.FC = () => {
         throw new Error(`保存失败: ${response.status} ${response.statusText}`);
       }
       
-      const result = await response.json();
+      // 不需要使用结果变量
+      await response.json();
       setSaveStatus({ status: 'completed' });
       setShowSaveConfirm(false);
       message.success('Prompt保存成功');
@@ -315,6 +389,239 @@ const DesignPromptGenerator: React.FC = () => {
   // 取消保存
   const handleCancelSave = () => {
     setShowSaveConfirm(false);
+  };
+  
+  // 添加设计分析展示组件
+  const renderDesignAnalysis = () => {
+    if (!designAnalysis || Object.keys(designAnalysis).length === 0) {
+      return null;
+    }
+
+    // 准备Collapse的items
+    const collapseItems = [];
+    
+    if (designAnalysis.design_style) {
+      collapseItems.push({
+        key: 'design_style',
+        label: '设计风格',
+        children: <Paragraph>{designAnalysis.design_style}</Paragraph>
+      });
+    }
+    
+    if (designAnalysis.layout) {
+      collapseItems.push({
+        key: 'layout',
+        label: '布局结构',
+        children: <Paragraph>{designAnalysis.layout}</Paragraph>
+      });
+    }
+    
+    if (designAnalysis.color_scheme) {
+      collapseItems.push({
+        key: 'color_scheme',
+        label: '颜色方案',
+        children: <Paragraph>{designAnalysis.color_scheme}</Paragraph>
+      });
+    }
+    
+    if (designAnalysis.ui_components) {
+      collapseItems.push({
+        key: 'ui_components',
+        label: 'UI组件',
+        children: Array.isArray(designAnalysis.ui_components) ? (
+          <ul>
+            {designAnalysis.ui_components.map((component: any, index: number) => (
+              <li key={index}>
+                {typeof component === 'object' ? 
+                  `${component.name || '组件'}: ${component.description || ''}` : 
+                  String(component)
+                }
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <Paragraph>{designAnalysis.ui_components}</Paragraph>
+        )
+      });
+    }
+    
+    if (designAnalysis.interaction_elements) {
+      collapseItems.push({
+        key: 'interaction_elements',
+        label: '交互元素',
+        children: <Paragraph>{designAnalysis.interaction_elements}</Paragraph>
+      });
+    }
+    
+    if (designAnalysis.usability) {
+      collapseItems.push({
+        key: 'usability',
+        label: '可用性评估',
+        children: <Paragraph>{designAnalysis.usability}</Paragraph>
+      });
+    }
+    
+    if (designAnalysis.tech_implementation) {
+      collapseItems.push({
+        key: 'tech_implementation',
+        label: '技术实现建议',
+        children: <Paragraph>{designAnalysis.tech_implementation}</Paragraph>
+      });
+    }
+
+    return (
+      <Card 
+        title="设计分析结果" 
+        style={{ marginTop: 16 }}
+        extra={<Text type="secondary">AI分析结果</Text>}
+      >
+        <Collapse defaultActiveKey={['design_style', 'ui_components']} items={collapseItems} />
+      </Card>
+    );
+  };
+  
+  // 渲染生成状态
+  const renderGenerationStatus = () => {
+    if (generationStatus.status === 'idle') {
+      return null;
+    }
+    
+    if (generationStatus.status === 'processing') {
+      return (
+        <div className="generation-status processing">
+          <Spin />
+          <span>正在生成Prompt...</span>
+        </div>
+      );
+    }
+    
+    if (generationStatus.status === 'error') {
+      return (
+        <div className="generation-status error">
+          <Alert 
+            type="error" 
+            message="生成失败" 
+            description={generationStatus.message || '未知错误'} 
+            showIcon 
+          />
+          {generationStatus.canRetry && (
+            <Button 
+              type="primary" 
+              onClick={handleGeneratePrompt} 
+              style={{ marginTop: 16 }}
+            >
+              重试
+            </Button>
+          )}
+        </div>
+      );
+    }
+    
+    if (generationStatus.status === 'completed' && generationStatus.message) {
+      return (
+        <div className="generation-status warning">
+          <Alert 
+            type="warning" 
+            message="使用兜底方案" 
+            description={generationStatus.message} 
+            showIcon 
+          />
+          {generationStatus.canRetry && (
+            <Button 
+              type="primary" 
+              onClick={handleGeneratePrompt} 
+              style={{ marginTop: 16 }}
+            >
+              重新生成
+            </Button>
+          )}
+        </div>
+      );
+    }
+    
+    return null;
+  };
+  
+  // 格式化生成的prompt
+  const formatGeneratedPrompt = (prompt: string): React.ReactNode => {
+    if (!prompt) return null;
+    
+    // 检查是否是Markdown格式
+    const isMdFormat = prompt.includes('##') || prompt.includes('#');
+    
+    if (isMdFormat) {
+      // 使用ReactMarkdown渲染Markdown内容
+      return (
+        <div className="markdown-content" style={{ padding: '10px' }}>
+          <ReactMarkdown>{prompt}</ReactMarkdown>
+        </div>
+      );
+    }
+    
+    // 以下是原有的格式化逻辑，用于处理非Markdown格式
+    // 分割文本为段落
+    const sections = prompt.split(/\d+\.\s+/).filter(section => section.trim());
+    
+    // 如果没有找到数字编号的段落，则直接返回原文本
+    if (sections.length === 0) {
+      return <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{prompt}</pre>;
+    }
+    
+    // 提取标题（如果有的话）
+    let title = '';
+    let content = prompt;
+    
+    if (prompt.startsWith('1.')) {
+      // 已经是格式化的内容，直接处理
+    } else {
+      // 尝试提取标题，使用[\s\S]代替/s标志
+      const titleMatch = prompt.match(/^([\s\S]*?)(?=\d+\.\s+)/);
+      if (titleMatch && titleMatch[0]) {
+        title = titleMatch[0].trim();
+        content = prompt.substring(title.length).trim();
+      }
+    }
+    
+    // 分割内容为带编号的段落
+    const numberedSections = content.split(/(\d+\.\s+[^\d]+)(?=\d+\.\s+|$)/g)
+      .filter(section => section.trim());
+    
+    return (
+      <div className="formatted-prompt">
+        {title && <div className="prompt-title">{title}</div>}
+        {numberedSections.map((section, index) => {
+          // 提取段落标题和内容，使用[\s\S]代替/s标志
+          const sectionMatch = section.match(/(\d+\.\s+)([^:：]+)[:：]?\s*([\s\S]*)/);
+          
+          if (sectionMatch) {
+            const [, number, sectionTitle, sectionContent] = sectionMatch;
+            
+            // 进一步分割内容为子项
+            const subItems = sectionContent.split(/[-•]\s+/).filter(item => item.trim());
+            
+            return (
+              <div key={index} className="prompt-section" style={{ marginBottom: '16px' }}>
+                <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>
+                  {number}{sectionTitle.trim()}
+                </div>
+                {subItems.length > 1 ? (
+                  <ul style={{ paddingLeft: '20px', margin: '8px 0' }}>
+                    {subItems.map((item, i) => (
+                      <li key={i} style={{ marginBottom: '4px' }}>{item.trim()}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div style={{ paddingLeft: '20px' }}>{sectionContent.trim()}</div>
+                )}
+              </div>
+            );
+          }
+          
+          // 如果不匹配预期格式，直接显示原文
+          return <div key={index} style={{ marginBottom: '8px' }}>{section}</div>;
+        })}
+      </div>
+    );
   };
   
   return (
@@ -447,94 +754,110 @@ const DesignPromptGenerator: React.FC = () => {
           </Form.Item>
         </Form>
         
-        {generationStatus.status === 'error' && (
-          <Alert 
-            message="生成失败" 
-            description={generationStatus.message} 
-            type="error" 
-            showIcon 
-            style={{ marginTop: '10px' }}
-          />
-        )}
+        {renderGenerationStatus()}
       </Card>
       
       <Card 
         title="步骤3: 查看和编辑生成的Prompt" 
         style={{ marginBottom: '20px' }}
-        extra={
-          generatedPrompt ? (
-            <Space>
-              {isEditing ? (
-                <>
-                  <Button onClick={handleCancelEditing}>取消</Button>
-                  <Button type="primary" onClick={handleConfirmSave}>保存</Button>
-                </>
-              ) : (
-                <Button 
-                  type="primary" 
-                  icon={<EditOutlined />} 
-                  onClick={handleStartEditing}
-                >
-                  编辑
-                </Button>
-              )}
-            </Space>
-          ) : null
-        }
       >
-        {generationStatus.status === 'completed' && (
-          <Alert
-            message={
-              hasHistoryContext 
-                ? `已使用 ${historyPrompts.length} 个历史Prompt作为上下文` 
-                : "没有找到相关的历史Prompt，使用默认上下文生成"
-            }
-            type={hasHistoryContext ? "success" : "info"}
-            showIcon
-            style={{ marginBottom: '16px' }}
-          />
-        )}
-        
-        {generatedPrompt ? (
-          isEditing ? (
-            <TextArea 
-              value={editedPrompt} 
-              onChange={e => setEditedPrompt(e.target.value)} 
-              autoSize={{ minRows: 10, maxRows: 20 }}
-            />
-          ) : (
-            <div style={{ whiteSpace: 'pre-wrap' }}>
-              {generatedPrompt}
+        {generationStatus.status === 'completed' ? (
+          <div style={{ display: 'flex', flexDirection: 'row', gap: '16px' }}>
+            <div style={{ flex: 1 }}>
+              {/* 生成结果展示 */}
+              <Card 
+                title="生成的Prompt" 
+                style={{ marginTop: 16 }}
+                extra={
+                  <Space>
+                    {!isEditing ? (
+                      <Button 
+                        type="primary" 
+                        icon={<EditOutlined />} 
+                        onClick={handleStartEditing}
+                        disabled={!generatedPrompt}
+                      >
+                        编辑
+                      </Button>
+                    ) : (
+                      <>
+                        <Button onClick={handleCancelEditing}>取消</Button>
+                        <Button 
+                          type="primary" 
+                          icon={<SaveOutlined />} 
+                          onClick={handleConfirmSave}
+                        >
+                          保存
+                        </Button>
+                      </>
+                    )}
+                  </Space>
+                }
+              >
+                {generatedPrompt ? (
+                  isEditing ? (
+                    <TextArea 
+                      value={editedPrompt} 
+                      onChange={e => setEditedPrompt(e.target.value)} 
+                      autoSize={{ minRows: 10, maxRows: 20 }}
+                    />
+                  ) : (
+                    <div className="generated-prompt-container">
+                      <div className="prompt-actions" style={{ marginBottom: '16px' }}>
+                        <Button 
+                          type="text" 
+                          icon={<CopyOutlined />} 
+                          onClick={() => {
+                            navigator.clipboard.writeText(generatedPrompt);
+                            message.success('已复制到剪贴板');
+                          }}
+                        >
+                          复制全文
+                        </Button>
+                      </div>
+                      <div className="prompt-content" style={{ maxHeight: '600px', overflow: 'auto' }}>
+                        {formatGeneratedPrompt(generatedPrompt)}
+                      </div>
+                    </div>
+                  )
+                ) : (
+                  <CustomEmpty description="请先生成Prompt" />
+                )}
+              </Card>
+              
+              {/* 设计分析结果展示 */}
+              {renderDesignAnalysis()}
             </div>
-          )
+          </div>
         ) : (
-          <Empty description="暂无生成的Prompt" />
+          <CustomEmpty description="请先生成Prompt" />
         )}
         
         {hasHistoryContext && historyPrompts.length > 0 && !isEditing && (
           <div style={{ marginTop: '20px' }}>
             <Divider orientation="left">参考的历史Prompt</Divider>
-            <Collapse>
-              {historyPrompts.map((prompt, index) => {
+            <Collapse 
+              items={historyPrompts.map((prompt, index) => {
                 const metadata = prompt.metadata || {};
-                return (
-                  <Collapse.Panel 
-                    key={index} 
-                    header={`历史Prompt ${index + 1} (${metadata.tech_stack || '未知技术栈'})`}
-                  >
-                    <div style={{ whiteSpace: 'pre-wrap' }}>
-                      {prompt.text || '无内容'}
-                    </div>
-                    <div style={{ marginTop: '10px', color: '#888' }}>
-                      <Text type="secondary">
-                        创建时间: {metadata.created_at || '未知'}
-                        {metadata.user_modified && ' | 用户修改: 是'}
-                      </Text>
-                    </div>
-                  </Collapse.Panel>
-                );
+                return {
+                  key: index,
+                  label: `历史Prompt ${index + 1} (${metadata.tech_stack || '未知技术栈'})`,
+                  children: (
+                    <>
+                      <div style={{ whiteSpace: 'pre-wrap' }}>
+                        {prompt.text || '无内容'}
+                      </div>
+                      <div style={{ marginTop: '10px', color: '#888' }}>
+                        <Text type="secondary">
+                          创建时间: {metadata.created_at || '未知'}
+                          {metadata.user_modified && ' | 用户修改: 是'}
+                        </Text>
+                      </div>
+                    </>
+                  )
+                };
               })}
-            </Collapse>
+            />
           </div>
         )}
       </Card>
@@ -562,17 +885,11 @@ const DesignPromptGenerator: React.FC = () => {
 };
 
 // Empty组件定义
-const Empty: React.FC<{ description: string }> = ({ description }) => (
-  <div style={{ 
-    display: 'flex', 
-    flexDirection: 'column', 
-    alignItems: 'center', 
-    justifyContent: 'center',
-    padding: '40px 0'
-  }}>
-    <div style={{ fontSize: '72px', color: '#ccc', marginBottom: '20px' }}>?</div>
-    <Text type="secondary">{description}</Text>
-  </div>
+const CustomEmpty: React.FC<{ description: string }> = ({ description }) => (
+  <Empty
+    description={<Text type="secondary">{description}</Text>}
+    style={{ padding: '40px 0' }}
+  />
 );
 
 export default DesignPromptGenerator; 

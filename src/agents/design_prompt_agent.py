@@ -4,6 +4,9 @@ from datetime import datetime
 import uuid
 import json
 import os
+from pathlib import Path
+import time
+import asyncio
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
@@ -99,7 +102,64 @@ class DesignPromptAgent:
         # 初始化工作流图
         self.workflow = self._build_workflow()
         
+        # 添加Prompt生成结果缓存
+        self.prompt_cache = {}
+        self.cache_file = Path(settings.UPLOAD_DIR) / "prompt_cache.json"
+        self._load_prompt_cache()
+        
         logger.info("设计图Prompt生成Agent初始化完成")
+    
+    def _load_prompt_cache(self):
+        """加载Prompt生成结果缓存"""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    self.prompt_cache = json.load(f)
+                logger.info(f"已加载Prompt生成结果缓存: {len(self.prompt_cache)}条记录")
+            else:
+                logger.info("Prompt生成结果缓存文件不存在，将创建新缓存")
+                self.prompt_cache = {}
+        except Exception as e:
+            logger.error(f"加载Prompt生成结果缓存失败: {str(e)}")
+            self.prompt_cache = {}
+    
+    def _save_prompt_cache(self):
+        """保存Prompt生成结果缓存"""
+        try:
+            # 限制缓存大小，最多保留100条记录
+            if len(self.prompt_cache) > 100:
+                # 按时间戳排序，保留最新的100条
+                sorted_cache = sorted(
+                    self.prompt_cache.items(), 
+                    key=lambda x: x[1].get("timestamp", 0),
+                    reverse=True
+                )
+                self.prompt_cache = dict(sorted_cache[:100])
+            
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(self.prompt_cache, f, ensure_ascii=False, indent=2)
+            logger.info(f"已保存Prompt生成结果缓存: {len(self.prompt_cache)}条记录")
+        except Exception as e:
+            logger.error(f"保存Prompt生成结果缓存失败: {str(e)}")
+    
+    def _get_cache_key(self, state: DesignPromptState) -> str:
+        """生成缓存键
+        
+        Args:
+            state: 当前状态
+            
+        Returns:
+            str: 缓存键
+        """
+        import hashlib
+        # 使用设计图ID、技术栈和用户提示词生成缓存键
+        key_parts = [
+            state["design_image_id"],
+            state["tech_stack"],
+            state.get("user_prompt", "")
+        ]
+        key_str = "_".join([str(part) for part in key_parts])
+        return hashlib.md5(key_str.encode()).hexdigest()
     
     def _build_workflow(self) -> StateGraph:
         """构建工作流图
@@ -281,11 +341,10 @@ class DesignPromptAgent:
             try:
                 logger.info("开始调用 design_processor.process_image 方法")
                 result = await self.design_processor.process_image(
-                    image_content=image_data,
-                    filename=os.path.basename(state["design_image_path"]),
-                    tech_stack=state["tech_stack"]
+                    file_content=image_data,
+                    file_name=os.path.basename(state["design_image_path"])
                 )
-                logger.info(f"design_processor.process_image 方法调用完成，结果: {result.get('success', False)}")
+                logger.info(f"design_processor.process_image 方法调用完成，结果: {result.get('id', '')}")
             except Exception as process_error:
                 logger.error(f"调用 design_processor.process_image 方法失败: {str(process_error)}")
                 import traceback
@@ -295,14 +354,6 @@ class DesignPromptAgent:
                 state["next_step"] = "generate_prompt"
                 return self._add_error_message(state, f"调用 design_processor.process_image 方法失败: {str(process_error)}")
             
-            if not result.get("success", False):
-                error_msg = result.get("error", "设计图分析失败")
-                logger.error(f"设计图分析失败: {error_msg}")
-                # 使用默认的分析结果
-                state["design_analysis"] = self._generate_default_analysis(state)
-                state["next_step"] = "generate_prompt"
-                return self._add_error_message(state, f"设计图分析失败: {error_msg}")
-                
             # 添加分析结果到状态
             state["design_analysis"] = result["analysis"]
             logger.info(f"分析结果长度: {len(result['analysis'])} 字符")
@@ -461,37 +512,168 @@ class DesignPromptAgent:
             # 使用较低的温度以获得更精确的结果
             self.llm.temperature = 0.3
             
-            # 生成Prompt
-            generated_prompt = await self.llm.ainvoke(prompt)
+            # 添加重试逻辑
+            max_retries = 3
+            retry_count = 0
+            backoff_time = 1.0
             
-            # 更新状态
-            state["generated_prompt"] = generated_prompt.content
+            while retry_count < max_retries:
+                try:
+                    # 生成Prompt
+                    logger.info(f"尝试生成Prompt (尝试 {retry_count + 1}/{max_retries})")
+                    generated_prompt = await self.llm.ainvoke(prompt)
+                    
+                    # 更新状态
+                    state["generated_prompt"] = generated_prompt.content
+                    
+                    # 添加AI消息
+                    messages = state.get("messages", [])
+                    messages.append({
+                        "role": "ai",
+                        "content": generated_prompt.content
+                    })
+                    state["messages"] = messages
+                    
+                    logger.info("成功生成Prompt")
+                    return state
+                    
+                except Exception as retry_error:
+                    retry_count += 1
+                    logger.warning(f"生成Prompt失败 (尝试 {retry_count}/{max_retries}): {str(retry_error)}")
+                    
+                    if retry_count >= max_retries:
+                        # 达到最大重试次数，抛出异常
+                        raise
+                    
+                    # 指数退避
+                    await asyncio.sleep(backoff_time)
+                    backoff_time *= 2
             
-            # 添加AI消息
-            messages = state.get("messages", [])
-            messages.append({
-                "role": "ai",
-                "content": generated_prompt.content
-            })
-            state["messages"] = messages
-            
-            return state
+            # 不应该到达这里，但为了安全起见
+            raise ValueError("达到最大重试次数后仍然失败")
             
         except Exception as e:
             logger.error(f"生成Prompt失败: {str(e)}")
             
-            # 更新状态
-            state["generated_prompt"] = f"生成Prompt失败: {str(e)}"
+            # 如果是OpenAI API的500错误，提供更友好的错误消息
+            error_msg = str(e)
+            if "500" in error_msg and "Internal Error" in error_msg:
+                error_msg = "OpenAI API服务器暂时不可用，请稍后重试。"
             
-            # 添加错误消息
+            # 兜底策略：使用设计图分析结果作为prompt
+            logger.info("使用设计图分析结果作为兜底prompt")
+            
+            # 将设计图分析结果格式化为结构化的prompt
+            design_analysis = state.get("design_analysis", {})
+            tech_stack = state.get("tech_stack", "未知技术栈")
+            
+            # 构建兜底prompt
+            fallback_prompt = self._build_fallback_prompt(design_analysis, tech_stack)
+            
+            # 更新状态
+            state["generated_prompt"] = fallback_prompt
+            
+            # 添加系统消息
             messages = state.get("messages", [])
             messages.append({
                 "role": "system",
-                "content": f"生成Prompt失败: {str(e)}"
+                "content": f"生成Prompt失败: {error_msg}，使用设计图分析结果作为兜底prompt。"
+            })
+            messages.append({
+                "role": "ai",
+                "content": fallback_prompt
             })
             state["messages"] = messages
             
             return state
+            
+    def _build_fallback_prompt(self, design_analysis: Dict[str, Any], tech_stack: str) -> str:
+        """构建兜底prompt
+        
+        Args:
+            design_analysis: 设计图分析结果
+            tech_stack: 技术栈
+            
+        Returns:
+            str: 兜底prompt
+        """
+        try:
+            # 提取设计图分析结果中的各个部分
+            design_style = design_analysis.get("design_style", "现代简约风格")
+            layout = design_analysis.get("layout", "网格布局")
+            color_scheme = design_analysis.get("color_scheme", "浅色背景，深色文本")
+            
+            # 处理UI组件
+            ui_components_text = ""
+            ui_components = design_analysis.get("ui_components", [])
+            if isinstance(ui_components, list) and ui_components:
+                ui_components_text = "UI组件包括：\n"
+                for i, component in enumerate(ui_components):
+                    if isinstance(component, dict):
+                        name = component.get("name", f"组件{i+1}")
+                        description = component.get("description", "")
+                        ui_components_text += f"- {name}: {description}\n"
+                    else:
+                        ui_components_text += f"- {component}\n"
+            elif isinstance(ui_components, str):
+                ui_components_text = f"UI组件：{ui_components}\n"
+                
+            interaction_elements = design_analysis.get("interaction_elements", "点击交互")
+            usability = design_analysis.get("usability", "良好的可用性")
+            tech_implementation = design_analysis.get("tech_implementation", f"使用{tech_stack}原生组件实现")
+            
+            # 构建结构化的prompt
+            fallback_prompt = f"""1. 设计图详细描述：
+{design_style}。{layout}。{color_scheme}。
+
+2. UI组件层次结构：
+{ui_components_text}
+
+3. 布局和排版要求：
+{layout}
+- 使用适当的边距和对齐方式确保界面整洁
+- 组件间距保持一致，建议使用8dp的基础间距
+- 文本大小根据重要性分级，标题16sp，正文14sp
+
+4. 交互和动画效果：
+{interaction_elements}
+- 点击时使用轻微的缩放和透明度变化提供反馈
+- 页面切换使用自然的过渡动画
+
+5. 技术实现建议：
+{tech_implementation}
+- 针对{tech_stack}技术栈，使用原生组件库
+- 遵循{tech_stack}的设计规范和最佳实践
+
+6. 适配和响应式设计要求：
+- 支持不同尺寸的设备，从小屏手机到平板
+- 使用弹性布局确保在不同屏幕上的一致性展示
+- 横竖屏切换时保持良好的用户体验
+"""
+            
+            return fallback_prompt
+            
+        except Exception as e:
+            logger.error(f"构建兜底prompt失败: {str(e)}")
+            # 如果构建失败，返回一个非常基础的prompt
+            return f"""1. 设计图详细描述：
+该设计采用现代简约风格，布局清晰。
+
+2. UI组件层次结构：
+包含多个基础UI组件，布局合理。
+
+3. 布局和排版要求：
+使用标准的{tech_stack}布局组件，保持一致的间距和对齐。
+
+4. 交互和动画效果：
+实现基础的点击交互，提供适当的视觉反馈。
+
+5. 技术实现建议：
+使用{tech_stack}标准组件库实现界面。
+
+6. 适配和响应式设计要求：
+确保在不同尺寸的设备上正常显示。
+"""
     
     def _format_similar_designs(self, similar_designs: List[Dict[str, Any]]) -> str:
         """格式化相似设计图信息
@@ -547,9 +729,9 @@ class DesignPromptAgent:
         rag_method: str = "similarity",
         retriever_top_k: int = 3,
         agent_type: str = "ReActAgent",
-        temperature: float = 0.7,
-        context_window_size: int = 4000,
-        prompt: Optional[str] = None
+        temperature: Optional[float] = None,
+        context_window_size: Optional[int] = None,
+        prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """生成设计图Prompt
         
@@ -558,9 +740,9 @@ class DesignPromptAgent:
             design_image_id: 设计图ID
             design_image_path: 设计图路径
             rag_method: RAG方法
-            retriever_top_k: 检索结果数量
+            retriever_top_k: 检索Top-K
             agent_type: Agent类型
-            temperature: 温度
+            temperature: 温度参数
             context_window_size: 上下文窗口大小
             prompt: 用户提供的提示词
             
@@ -568,42 +750,77 @@ class DesignPromptAgent:
             Dict[str, Any]: 生成结果
         """
         try:
-            # 设置初始状态
-            initial_state = DesignPromptState(
-                messages=[],
-                tech_stack=tech_stack,
-                design_image_id=design_image_id,
-                design_image_path=design_image_path,
-                similar_designs=[],
-                history_prompts=[],
-                rag_method=rag_method,
-                retriever_top_k=retriever_top_k,
-                agent_type=agent_type,
-                temperature=temperature,
-                context_window_size=context_window_size,
-                generated_prompt="",
-                next_step="retrieve_similar_designs",
-                design_analysis="",
-                user_prompt=prompt
-            )
+            # 初始化状态
+            state: DesignPromptState = {
+                "messages": [],
+                "tech_stack": tech_stack,
+                "design_image_id": design_image_id,
+                "design_image_path": design_image_path,
+                "similar_designs": [],
+                "history_prompts": [],
+                "rag_method": rag_method,
+                "retriever_top_k": retriever_top_k,
+                "agent_type": agent_type,
+                "temperature": temperature or self.temperature,
+                "context_window_size": context_window_size or settings.PROMPT_OPTIMIZATION_CONFIG["context_window_size"],
+                "generated_prompt": "",
+                "next_step": "retrieve_similar_designs",
+                "design_analysis": {},
+                "user_prompt": prompt,
+            }
+            
+            # 检查缓存
+            cache_key = self._get_cache_key(state)
+            if cache_key in self.prompt_cache:
+                cache_data = self.prompt_cache[cache_key]
+                logger.info(f"从缓存中获取Prompt生成结果: {cache_key}")
+                # 更新时间戳
+                cache_data["timestamp"] = time.time()
+                self.prompt_cache[cache_key] = cache_data
+                self._save_prompt_cache()
+                return cache_data["result"]
             
             # 执行工作流
-            result = await self.workflow.ainvoke(initial_state)
+            try:
+                result = await self.workflow.ainvoke(state)
+            except Exception as workflow_error:
+                logger.error(f"工作流执行失败: {str(workflow_error)}")
+                # 检查是否是OpenAI API的500错误
+                error_msg = str(workflow_error)
+                if "500" in error_msg and "Internal Error" in error_msg:
+                    error_msg = "OpenAI API服务器暂时不可用，请稍后重试。"
+                
+                return {
+                    "generated_prompt": "",
+                    "error": error_msg,
+                    "tech_stack": tech_stack,
+                    "design_image_id": design_image_id,
+                    "messages": state.get("messages", []),
+                    "similar_designs": state.get("similar_designs", []),
+                    "history_prompts": state.get("history_prompts", []),
+                    "has_history_context": False,
+                    "design_analysis": state.get("design_analysis", {})
+                }
             
             # 保存生成的Prompt到向量数据库
             if result["generated_prompt"]:
-                await self.vector_store.add_texts(
-                    texts=[result["generated_prompt"]],
-                    metadatas=[{
-                        "id": str(uuid.uuid4()),
-                        "tech_stack": tech_stack,
-                        "design_image_id": design_image_id,
-                        "type": "design_prompt",
-                        "created_at": datetime.now().isoformat()
-                    }]
-                )
+                try:
+                    await self.vector_store.add_texts(
+                        texts=[result["generated_prompt"]],
+                        metadatas=[{
+                            "id": str(uuid.uuid4()),
+                            "tech_stack": tech_stack,
+                            "design_image_id": design_image_id,
+                            "type": "design_prompt",
+                            "created_at": datetime.now().isoformat()
+                        }]
+                    )
+                    logger.info(f"已保存生成的Prompt到向量数据库: {design_image_id}")
+                except Exception as e:
+                    logger.error(f"保存Prompt到向量数据库失败: {str(e)}")
             
-            return {
+            # 格式化返回结果
+            formatted_result = {
                 "generated_prompt": result["generated_prompt"],
                 "tech_stack": tech_stack,
                 "design_image_id": design_image_id,
@@ -614,10 +831,27 @@ class DesignPromptAgent:
                 "design_analysis": result["design_analysis"]
             }
             
+            # 保存到缓存
+            self.prompt_cache[cache_key] = {
+                "result": formatted_result,
+                "timestamp": time.time()
+            }
+            self._save_prompt_cache()
+            
+            return formatted_result
+            
         except Exception as e:
             logger.error(f"生成设计图Prompt失败: {str(e)}")
+            logger.exception(e)
+            
+            # 检查是否是OpenAI API的500错误
+            error_msg = str(e)
+            if "500" in error_msg and "Internal Error" in error_msg:
+                error_msg = "OpenAI API服务器暂时不可用，请稍后重试。"
+            
             return {
-                "error": str(e),
+                "generated_prompt": "",
+                "error": error_msg,
                 "tech_stack": tech_stack,
                 "design_image_id": design_image_id
             }

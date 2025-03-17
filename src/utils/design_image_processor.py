@@ -9,277 +9,341 @@ from PIL import Image
 import io
 import numpy as np
 import json
+import asyncio
+import time
+import copy
+import re
 
 from config.config import settings
 from src.utils.vector_store import VectorStore
 from openai import OpenAI
+from langchain_openai.chat_models import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
 class DesignImageProcessor:
     """设计图处理器，用于处理上传的设计图并生成向量"""
     
-    def __init__(self, vector_store: Optional[VectorStore] = None):
+    def __init__(
+        self,
+        upload_dir: Optional[str] = None,
+        vector_store: Optional[VectorStore] = None,
+        temperature: float = None,
+        max_tokens: int = None
+    ):
         """初始化设计图处理器
         
         Args:
+            upload_dir: 上传目录
             vector_store: 向量存储实例
+            temperature: 温度参数
+            max_tokens: 最大token数
         """
-        self.vector_store = vector_store or VectorStore()
-        self.upload_dir = Path(settings.UPLOAD_DIR) / "design_images"
+        self.upload_dir = upload_dir or os.path.join(settings.UPLOAD_DIR, "design_images")
+        os.makedirs(self.upload_dir, exist_ok=True)
         
-        # 初始化多模态模型
-        self.vision_model = OpenAI(
+        self.vector_store = vector_store or VectorStore()
+        
+        # 使用传入的参数或配置文件中的默认值
+        self.temperature = temperature or settings.PROMPT_OPTIMIZATION_CONFIG["temperature"]
+        self.max_tokens = max_tokens or settings.PROMPT_OPTIMIZATION_CONFIG["max_tokens"]
+        
+        # 初始化LLM
+        self.llm = ChatOpenAI(
+            model_name=settings.DESIGN_PROMPT_CONFIG.get("model_name", settings.DEFAULT_MODEL_NAME),
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_BASE_URL
         )
         
-        # 确保上传目录存在
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        # 初始化视觉模型
+        self.vision_model = ChatOpenAI(
+            model_name=settings.VISION_MODEL_NAME,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_BASE_URL
+        )
         
-        logger.info(f"设计图处理器初始化完成，上传目录: {self.upload_dir}")
+        # 添加设计图分析结果缓存
+        self.analysis_cache = {}
+        self.cache_file = Path(settings.UPLOAD_DIR) / "design_analysis_cache.json"
+        self._load_analysis_cache()
+        
+        logger.info("设计图处理器初始化完成")
     
-    def is_supported_image(self, filename: str) -> bool:
-        """检查文件是否为支持的图片格式
+    def _load_analysis_cache(self):
+        """加载设计图分析结果缓存"""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    self.analysis_cache = json.load(f)
+                logger.info(f"已加载设计图分析结果缓存: {len(self.analysis_cache)}条记录")
+            else:
+                logger.info("设计图分析结果缓存文件不存在，将创建新缓存")
+                self.analysis_cache = {}
+        except Exception as e:
+            logger.error(f"加载设计图分析结果缓存失败: {str(e)}")
+            self.analysis_cache = {}
+    
+    def _save_analysis_cache(self):
+        """保存设计图分析结果缓存"""
+        try:
+            # 限制缓存大小，最多保留100条记录
+            if len(self.analysis_cache) > 100:
+                # 按时间戳排序，保留最新的100条
+                sorted_cache = sorted(
+                    self.analysis_cache.items(), 
+                    key=lambda x: x[1].get("timestamp", 0),
+                    reverse=True
+                )
+                self.analysis_cache = dict(sorted_cache[:100])
+            
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(self.analysis_cache, f, ensure_ascii=False, indent=2)
+            logger.info(f"已保存设计图分析结果缓存: {len(self.analysis_cache)}条记录")
+        except Exception as e:
+            logger.error(f"保存设计图分析结果缓存失败: {str(e)}")
+    
+    def _get_image_hash(self, image_content: bytes) -> str:
+        """计算图片哈希值
         
         Args:
-            filename: 文件名
+            image_content: 图片数据
+            
+        Returns:
+            str: 图片哈希值
+        """
+        import hashlib
+        return hashlib.md5(image_content).hexdigest()
+    
+    def is_supported_image(self, file_path: str) -> bool:
+        """检查是否为支持的图片格式
+        
+        Args:
+            file_path: 文件路径
             
         Returns:
             bool: 是否支持
         """
-        supported_extensions = ['.jpg', '.jpeg', '.png', '.webp']
-        ext = Path(filename).suffix.lower()
-        return ext in supported_extensions
+        supported_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+        file_ext = os.path.splitext(file_path)[1].lower()
+        return file_ext in supported_extensions
     
     async def process_image(
-        self, 
-        image_content: bytes, 
-        filename: str, 
-        tech_stack: str,
-        metadata: Optional[Dict[str, Any]] = None
+        self,
+        file_content: bytes,
+        file_name: str,
+        image_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """处理设计图
         
         Args:
-            image_content: 图片数据
-            filename: 文件名
-            tech_stack: 技术栈 (Android/iOS/Flutter)
-            metadata: 元数据
+            file_content: 文件内容
+            file_name: 文件名
+            image_id: 图片ID，如果为None则自动生成
             
         Returns:
             Dict[str, Any]: 处理结果
         """
-        file_id = str(uuid.uuid4())
-        file_path = None
-        
         try:
-            logger.info(f"开始处理设计图: {filename}, 技术栈: {tech_stack}, 数据大小: {len(image_content)} 字节")
+            # 检查文件格式
+            if not self.is_supported_image(file_name):
+                raise ValueError(f"不支持的文件格式: {file_name}")
             
-            # 1. 验证图片格式
-            try:
-                from PIL import Image
-                import io
-                img = Image.open(io.BytesIO(image_content))
-                img_format = img.format.lower() if img.format else "unknown"
-                img_size = img.size
-                logger.info(f"图片尺寸: {img_size[0]}x{img_size[1]}, 格式: {img_format}")
+            # 生成图片ID
+            if image_id is None:
+                image_id = str(uuid.uuid4())
+            
+            # 获取文件扩展名
+            ext = os.path.splitext(file_name)[1].lower()
+            
+            # 保存文件
+            file_path = os.path.join(self.upload_dir, f"{image_id}{ext}")
+            with open(file_path, "wb") as f:
+                f.write(file_content)
+            
+            # 计算图片哈希值用于缓存
+            image_hash = self._get_image_hash(file_content)
+            
+            # 检查缓存
+            if image_hash in self.analysis_cache:
+                cache_data = self.analysis_cache[image_hash]
+                logger.info(f"从缓存中获取设计图分析结果: {image_hash}")
+                # 更新时间戳
+                cache_data["timestamp"] = time.time()
+                self.analysis_cache[image_hash] = cache_data
+                self._save_analysis_cache()
                 
-                if img_format not in ['jpeg', 'jpg', 'png', 'webp']:
-                    logger.error(f"不支持的图片格式: {img_format}")
-                    return {
-                        "success": False,
-                        "error": f"不支持的图片格式: {img_format}",
-                        "filename": filename,
-                        "tech_stack": tech_stack,
-                        "id": file_id
-                    }
-                logger.info(f"图片格式验证通过: {img_format}")
-            except Exception as e:
-                logger.error(f"图片格式验证失败: {str(e)}")
-                import traceback
-                logger.error(f"详细错误信息: {traceback.format_exc()}")
-                return {
-                    "success": False,
-                    "error": f"无效的图片数据: {str(e)}",
-                    "filename": filename,
-                    "tech_stack": tech_stack,
-                    "id": file_id
-                }
-
-            # 2. 生成唯一文件名
-            ext = Path(filename).suffix
-            unique_filename = f"{file_id}{ext}"
-            file_path = self.upload_dir / unique_filename
-            logger.info(f"生成唯一文件名: {unique_filename}, 完整路径: {file_path}")
+                # 返回缓存结果，但更新ID和路径
+                result = copy.deepcopy(cache_data["result"])
+                result["id"] = image_id
+                result["file_path"] = file_path
+                result["file_name"] = file_name
+                result["file_size"] = len(file_content)
+                return result
             
-            # 3. 保存图片
-            try:
-                with open(file_path, "wb") as f:
-                    f.write(image_content)
-                logger.info(f"图片已保存: {file_path}")
-            except Exception as e:
-                logger.error(f"保存图片失败: {str(e)}")
-                import traceback
-                logger.error(f"详细错误信息: {traceback.format_exc()}")
-                return {
-                    "success": False,
-                    "error": f"保存图片失败: {str(e)}",
-                    "filename": filename,
-                    "tech_stack": tech_stack,
-                    "id": file_id
-                }
+            # 分析设计图
+            analysis_result = await self.analyze_design(file_path)
             
-            # 4. 准备元数据
-            if metadata is None:
-                metadata = {}
-                
-            full_metadata = {
-                **metadata,
-                "id": file_id,
-                "filename": filename,
-                "unique_filename": unique_filename,
-                "file_path": str(file_path),
-                "tech_stack": tech_stack,
-                "upload_time": datetime.now().isoformat(),
-                "type": "design_image",
-                "image_format": img_format,
-                "image_size": len(image_content),
-                "image_dimensions": img.size
-            }
-            logger.info(f"元数据准备完成: {json.dumps(full_metadata, ensure_ascii=False)}")
-            
-            # 5. 使用多模态模型分析图片
-            analysis_text = ""
-            try:
-                # 检查 vision_model 是否已初始化
-                if not hasattr(self, 'vision_model') or self.vision_model is None:
-                    logger.error("Vision model未初始化")
-                    analysis_text = self._generate_default_analysis(tech_stack, filename)
-                else:
-                    # 构建详细的分析提示
-                    analysis_prompt = self._build_analysis_prompt(tech_stack)
-                    
-                    logger.info(f"使用模型: gpt-4o, 最大token数: 3000, 温度: 0.3")
-                    logger.info(f"API基础URL: {settings.OPENAI_BASE_URL}")
-                    
-                    # 准备base64编码的图片
-                    base64_image = base64.b64encode(image_content).decode('utf-8')
-                    logger.info(f"图片base64编码长度: {len(base64_image)}")
-                    
-                    # 创建请求消息
-                    messages = [
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
-                                "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
-                                "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": analysis_prompt
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/{img_format};base64,{base64_image}"
-                                    }
-                                }
-                            ]
-                        }
-                    ]
-                    
-                    logger.info("开始发送请求到OpenAI API")
-                    try:
-                        response = self.vision_model.chat.completions.create(
-                            model="gpt-4o",
-                            messages=messages,
-                            max_tokens=3000,
-                            temperature=0.3
-                        )
-                        logger.info(f"Vision model调用成功: {filename}")
-                        logger.info(f"响应ID: {response.id}, 模型: {response.model}, 使用token: {response.usage.total_tokens}")
-                        
-                        # 验证分析结果
-                        analysis_text = response.choices[0].message.content
-                        logger.info(f"获取到分析结果，长度: {len(analysis_text)} 字符")
-                        
-                        if not analysis_text:
-                            logger.error(f"分析结果为空: {filename}")
-                            analysis_text = self._generate_default_analysis(tech_stack, filename)
-                        elif len(analysis_text.strip()) < 100:
-                            logger.warning(f"分析结果过短 ({len(analysis_text.strip())}字符): {filename}")
-                            analysis_text = self._generate_default_analysis(tech_stack, filename)
-                        
-                        logger.info(f"成功获取分析结果 ({len(analysis_text.strip())}字符): {filename}")
-                    except Exception as api_error:
-                        logger.error(f"Vision model API调用失败: {str(api_error)}")
-                        import traceback
-                        logger.error(f"详细错误信息: {traceback.format_exc()}")
-                        analysis_text = self._generate_default_analysis(tech_stack, filename)
-            except Exception as e:
-                logger.error(f"图片分析失败: {str(e)}")
-                import traceback
-                logger.error(f"详细错误信息: {traceback.format_exc()}")
-                analysis_text = self._generate_default_analysis(tech_stack, filename)
-            
-            # 6. 添加到向量存储
-            try:
-                # 将分析结果按类别拆分
-                analysis_sections = self._split_analysis_sections(analysis_text)
-                logger.info(f"分析结果已按类别拆分: {list(analysis_sections.keys())}")
-                
-                # 为每个部分创建单独的向量
-                for section_type, section_text in analysis_sections.items():
-                    section_metadata = {
-                        **full_metadata,
-                        "section_type": section_type
-                    }
-                    
-                    await self.vector_store.add_texts(
-                        texts=[section_text],
-                        metadatas=[section_metadata],
-                        ids=[f"{file_id}_{section_type}"]
-                    )
-                    logger.info(f"已添加{section_type}部分到向量存储")
-                    
-            except Exception as e:
-                logger.error(f"添加到向量存储失败: {str(e)}")
-                import traceback
-                logger.error(f"详细错误信息: {traceback.format_exc()}")
-                # 继续执行，不要因为向量存储失败而中断整个流程
-            
-            logger.info(f"设计图处理完成: {filename}, ID: {file_id}")
-            
-            return {
-                "id": file_id,
-                "filename": filename,
-                "unique_filename": unique_filename,
-                "file_path": str(file_path),
-                "tech_stack": tech_stack,
-                "analysis": analysis_text,
-                "analysis_sections": analysis_sections,
-                "success": True
+            # 构建结果
+            result = {
+                "id": image_id,
+                "file_name": file_name,
+                "file_path": file_path,
+                "file_size": len(file_content),
+                "analysis": analysis_result
             }
             
+            # 保存到缓存
+            self.analysis_cache[image_hash] = {
+                "result": result,
+                "timestamp": time.time()
+            }
+            self._save_analysis_cache()
+            
+            return result
         except Exception as e:
-            logger.error(f"处理设计图失败: {str(e)}", exc_info=True)
-            # 如果文件已经保存，返回文件路径
-            file_path_str = str(file_path) if file_path else "未保存"
-            return {
-                "success": False,
-                "error": str(e),
-                "filename": filename,
-                "tech_stack": tech_stack,
-                "id": file_id,
-                "file_path": file_path_str
-            }
+            logger.error(f"处理设计图失败: {str(e)}")
+            logger.exception(e)
+            raise
+    
+    async def analyze_design(self, image_path: str) -> Dict[str, Any]:
+        """分析设计图
+        
+        Args:
+            image_path: 图片路径
             
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        try:
+            # 读取图片
+            with open(image_path, "rb") as f:
+                image_content = f.read()
+            
+            # 计算图片哈希值用于缓存
+            image_hash = self._get_image_hash(image_content)
+            
+            # 检查缓存
+            if image_hash in self.analysis_cache:
+                cache_data = self.analysis_cache[image_hash]
+                logger.info(f"从缓存中获取设计图分析结果: {image_hash}")
+                # 更新时间戳
+                cache_data["timestamp"] = time.time()
+                self.analysis_cache[image_hash] = cache_data
+                self._save_analysis_cache()
+                
+                # 返回缓存的分析结果
+                if "result" in cache_data and "analysis" in cache_data["result"]:
+                    return cache_data["result"]["analysis"]
+            
+            # 编码图片为base64
+            image_base64 = base64.b64encode(image_content).decode("utf-8")
+            
+            # 构建请求
+            messages = [
+                {
+                    "role": "system",
+                    "content": """你是一个专业的UI/UX设计分析师。你的任务是分析用户提供的UI设计图，并提供详细的分析报告。
+请关注以下方面：
+1. 设计风格和主题
+2. 布局结构和组织
+3. 颜色方案和视觉层次
+4. 主要UI组件和元素
+5. 交互设计元素
+6. 可用性和用户体验考虑
+7. 技术实现建议
+
+请以JSON格式返回分析结果，包含以下字段：
+- design_style: 设计风格描述
+- layout: 布局结构描述
+- color_scheme: 颜色方案描述
+- ui_components: UI组件列表及描述
+- interaction_elements: 交互元素描述
+- usability: 可用性评估
+- tech_implementation: 技术实现建议
+"""
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请分析这个UI设计图，并提供详细的分析报告。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                    ]
+                }
+            ]
+            
+            # 调用视觉模型
+            start_time = time.time()
+            logger.info(f"开始分析设计图: {image_path}")
+            
+            response = await self.vision_model.agenerate(messages=[messages])
+            
+            # 解析响应
+            response_text = response.generations[0][0].text
+            
+            # 尝试提取JSON
+            try:
+                # 查找JSON部分
+                json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response_text)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    json_str = response_text
+                
+                # 解析JSON
+                analysis_result = json.loads(json_str)
+            except Exception as e:
+                logger.error(f"解析分析结果JSON失败: {str(e)}")
+                # 如果解析失败，返回原始文本
+                analysis_result = {"raw_analysis": response_text}
+            
+            end_time = time.time()
+            logger.info(f"设计图分析完成，耗时: {end_time - start_time:.2f}秒")
+            
+            # 保存到缓存
+            self.analysis_cache[image_hash] = {
+                "result": {"analysis": analysis_result},
+                "timestamp": time.time()
+            }
+            self._save_analysis_cache()
+            
+            return analysis_result
+        except Exception as e:
+            logger.error(f"分析设计图失败: {str(e)}")
+            logger.exception(e)
+            return {"error": str(e)}
+    
+    async def _add_to_vector_store(self, analysis_sections: Dict[str, str], full_metadata: Dict[str, Any], file_id: str):
+        """异步添加到向量存储
+        
+        Args:
+            analysis_sections: 分析结果各部分
+            full_metadata: 完整元数据
+            file_id: 文件ID
+        """
+        try:
+            # 为每个部分创建单独的向量
+            for section_type, section_text in analysis_sections.items():
+                section_metadata = {
+                    **full_metadata,
+                    "section_type": section_type
+                }
+                
+                await self.vector_store.add_texts(
+                    texts=[section_text],
+                    metadatas=[section_metadata],
+                    ids=[f"{file_id}_{section_type}"]
+                )
+                logger.info(f"已添加{section_type}部分到向量存储")
+        except Exception as e:
+            logger.error(f"添加到向量存储失败: {str(e)}")
+            import traceback
+            logger.error(f"详细错误信息: {traceback.format_exc()}")
+            # 继续执行，不要因为向量存储失败而中断整个流程
+    
     def _build_analysis_prompt(self, tech_stack: str) -> str:
         """构建分析提示
         

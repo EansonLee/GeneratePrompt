@@ -74,6 +74,11 @@ class Config:
         return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     
     @property
+    def VISION_MODEL_NAME(self) -> str:
+        """视觉模型名称"""
+        return os.getenv("VISION_MODEL_NAME", "gpt-4o")
+    
+    @property
     def MODEL_CONFIG(self) -> Dict[str, Any]:
         """模型配置"""
         return {
