@@ -119,6 +119,7 @@ class GenerateDesignPromptRequest(BaseModel):
     agent_type: str = Field(settings.DESIGN_PROMPT_CONFIG["default_agent_type"], description="Agent类型")
     temperature: float = Field(settings.DESIGN_PROMPT_CONFIG["temperature"], description="温度")
     context_window_size: int = Field(settings.DESIGN_PROMPT_CONFIG["default_context_window_size"], description="上下文窗口大小")
+    prompt: Optional[str] = Field(None, description="提示词")
 
 class SaveUserModifiedPromptRequest(BaseModel):
     """保存用户修改后的Prompt请求"""
@@ -487,13 +488,23 @@ async def upload_design_image(
             tech_stack=tech_stack
         )
         
+        # 获取图片尺寸
+        width, height = 0, 0
+        if "analysis_sections" in result and result["analysis_sections"]:
+            # 尝试从分析结果中提取尺寸信息
+            width = result.get("width", 0)
+            height = result.get("height", 0)
+        elif "image_dimensions" in result:
+            # 如果有图片尺寸信息，直接使用
+            width, height = result["image_dimensions"] if isinstance(result["image_dimensions"], tuple) else (0, 0)
+        
         return {
             "status": "success",
-            "image_id": result["image_id"],
-            "image_path": result["image_path"],
+            "image_id": result["id"],  # 使用 id 字段作为 image_id
+            "image_path": result["file_path"],
             "tech_stack": tech_stack,
-            "width": result.get("width", 0),
-            "height": result.get("height", 0),
+            "width": width,
+            "height": height,
             "processing_time": result.get("processing_time", 0)
         }
         
@@ -516,7 +527,7 @@ async def generate_design_prompt(request: GenerateDesignPromptRequest):
     """
     try:
         # 生成设计图Prompt
-        result = await design_prompt_agent.generate_prompt(
+        result = await design_prompt_agent.generate_design_prompt(
             tech_stack=request.tech_stack,
             design_image_id=request.design_image_id,
             design_image_path=request.design_image_path,
@@ -524,12 +535,14 @@ async def generate_design_prompt(request: GenerateDesignPromptRequest):
             retriever_top_k=request.retriever_top_k,
             agent_type=request.agent_type,
             temperature=request.temperature,
-            context_window_size=request.context_window_size
+            context_window_size=request.context_window_size,
+            prompt=request.prompt
         )
         
         return {
             "status": "success",
-            "prompt": result["prompt"],
+            "prompt": result["generated_prompt"],
+            "generated_prompt": result["generated_prompt"],
             "generation_time": result.get("generation_time", 0),
             "token_usage": result.get("token_usage", {}),
             "rag_info": result.get("rag_info", {})
@@ -603,7 +616,7 @@ async def confirm_template(request: ConfirmTemplateRequest) -> Dict[str, Any]:
 
 @app.post("/api/confirm-prompt")
 async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
-    """确认优化后的prompt的API
+    """确认优化后的prompt
     
     Args:
         request: 请求体
@@ -613,14 +626,15 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
     """
     try:
         logger.info("确认优化后的prompt...")
+        logger.info(f"请求参数: {request.dict()}")
         
-        # 这里可以添加prompt确认的逻辑，例如保存到数据库或向量存储
-        # 目前只是简单返回成功
+        # 保存到向量数据库
+        await vector_store.add_prompt(request.optimized_prompt)
         
         return {
             "status": "success",
-            "message": "优化后的prompt已确认",
-            "optimized_prompt": request.optimized_prompt
+            "message": "已确认并保存优化后的prompt",
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
@@ -631,7 +645,35 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
             status_code=500,
             detail={
                 "status": "error",
-                "message": f"确认优化后的prompt失败: {str(e)}",
+                "message": f"确认失败: {str(e)}",
+                "code": "INTERNAL_ERROR"
+            }
+        )
+
+@app.get("/api/vector-db-status")
+async def get_vector_db_status():
+    """获取向量数据库状态
+    
+    Returns:
+        Dict[str, Any]: 向量数据库状态信息
+    """
+    try:
+        return {
+            "status": "ready" if vector_store.is_initialized() else "initializing",
+            "error": vector_store.get_initialization_error(),
+            "is_ready": vector_store.is_initialized(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"获取向量数据库状态失败: {str(e)}")
+        if settings.DEBUG:
+            logger.debug("详细错误信息:", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": f"获取状态失败: {str(e)}",
                 "code": "INTERNAL_ERROR"
             }
         )

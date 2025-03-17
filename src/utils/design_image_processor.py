@@ -39,9 +39,22 @@ class DesignImageProcessor:
         
         logger.info(f"设计图处理器初始化完成，上传目录: {self.upload_dir}")
     
+    def is_supported_image(self, filename: str) -> bool:
+        """检查文件是否为支持的图片格式
+        
+        Args:
+            filename: 文件名
+            
+        Returns:
+            bool: 是否支持
+        """
+        supported_extensions = ['.jpg', '.jpeg', '.png', '.webp']
+        ext = Path(filename).suffix.lower()
+        return ext in supported_extensions
+    
     async def process_image(
         self, 
-        image_data: bytes, 
+        image_content: bytes, 
         filename: str, 
         tech_stack: str,
         metadata: Optional[Dict[str, Any]] = None
@@ -49,7 +62,7 @@ class DesignImageProcessor:
         """处理设计图
         
         Args:
-            image_data: 图片数据
+            image_content: 图片数据
             filename: 文件名
             tech_stack: 技术栈 (Android/iOS/Flutter)
             metadata: 元数据
@@ -57,34 +70,65 @@ class DesignImageProcessor:
         Returns:
             Dict[str, Any]: 处理结果
         """
+        file_id = str(uuid.uuid4())
+        file_path = None
+        
         try:
+            logger.info(f"开始处理设计图: {filename}, 技术栈: {tech_stack}, 数据大小: {len(image_content)} 字节")
+            
             # 1. 验证图片格式
             try:
                 from PIL import Image
                 import io
-                img = Image.open(io.BytesIO(image_data))
-                img_format = img.format.lower()
+                img = Image.open(io.BytesIO(image_content))
+                img_format = img.format.lower() if img.format else "unknown"
+                img_size = img.size
+                logger.info(f"图片尺寸: {img_size[0]}x{img_size[1]}, 格式: {img_format}")
+                
                 if img_format not in ['jpeg', 'jpg', 'png', 'webp']:
-                    raise ValueError(f"不支持的图片格式: {img_format}")
+                    logger.error(f"不支持的图片格式: {img_format}")
+                    return {
+                        "success": False,
+                        "error": f"不支持的图片格式: {img_format}",
+                        "filename": filename,
+                        "tech_stack": tech_stack,
+                        "id": file_id
+                    }
                 logger.info(f"图片格式验证通过: {img_format}")
             except Exception as e:
                 logger.error(f"图片格式验证失败: {str(e)}")
-                raise ValueError(f"无效的图片数据: {str(e)}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                return {
+                    "success": False,
+                    "error": f"无效的图片数据: {str(e)}",
+                    "filename": filename,
+                    "tech_stack": tech_stack,
+                    "id": file_id
+                }
 
             # 2. 生成唯一文件名
-            file_id = str(uuid.uuid4())
             ext = Path(filename).suffix
             unique_filename = f"{file_id}{ext}"
             file_path = self.upload_dir / unique_filename
+            logger.info(f"生成唯一文件名: {unique_filename}, 完整路径: {file_path}")
             
             # 3. 保存图片
             try:
                 with open(file_path, "wb") as f:
-                    f.write(image_data)
+                    f.write(image_content)
                 logger.info(f"图片已保存: {file_path}")
             except Exception as e:
                 logger.error(f"保存图片失败: {str(e)}")
-                raise
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                return {
+                    "success": False,
+                    "error": f"保存图片失败: {str(e)}",
+                    "filename": filename,
+                    "tech_stack": tech_stack,
+                    "id": file_id
+                }
             
             # 4. 准备元数据
             if metadata is None:
@@ -100,115 +144,89 @@ class DesignImageProcessor:
                 "upload_time": datetime.now().isoformat(),
                 "type": "design_image",
                 "image_format": img_format,
-                "image_size": len(image_data),
+                "image_size": len(image_content),
                 "image_dimensions": img.size
             }
             logger.info(f"元数据准备完成: {json.dumps(full_metadata, ensure_ascii=False)}")
             
             # 5. 使用多模态模型分析图片
+            analysis_text = ""
             try:
-                # 构建详细的分析提示
-                analysis_prompt = (
-                    f"你是一个专业的UI设计分析专家。请详细分析这个{tech_stack}应用界面设计图，"
-                    "并按以下分类进行分析：\n\n"
+                # 检查 vision_model 是否已初始化
+                if not hasattr(self, 'vision_model') or self.vision_model is None:
+                    logger.error("Vision model未初始化")
+                    analysis_text = self._generate_default_analysis(tech_stack, filename)
+                else:
+                    # 构建详细的分析提示
+                    analysis_prompt = self._build_analysis_prompt(tech_stack)
                     
-                    "1. 布局结构分析：\n"
-                    "- 主要布局类型（如ConstraintLayout、LinearLayout、RelativeLayout等）\n"
-                    "- 具体布局层次和嵌套关系\n"
-                    "- 各组件的位置和对齐方式（顶部对齐、居中等）\n"
-                    "- 页面整体结构（顶部导航、内容区、底部栏等）\n"
-                    "- 响应式布局特征\n\n"
+                    logger.info(f"使用模型: gpt-4o, 最大token数: 3000, 温度: 0.3")
+                    logger.info(f"API基础URL: {settings.OPENAI_BASE_URL}")
                     
-                    "2. UI组件详细清单：\n"
-                    "- 导航组件（Toolbar、TabLayout、BottomNavigationView等）\n"
-                    "- 列表/网格组件（RecyclerView、GridView等）\n"
-                    "- 基础组件（Button、TextView、ImageView等）\n"
-                    "- 自定义组件\n"
-                    "- 组件的具体属性（大小、边距、内边距等）\n\n"
+                    # 准备base64编码的图片
+                    base64_image = base64.b64encode(image_content).decode('utf-8')
+                    logger.info(f"图片base64编码长度: {len(base64_image)}")
                     
-                    "3. 视觉设计规范：\n"
-                    "- 主色调和辅助色（提供具体的色值，如#FFFFFF）\n"
-                    "- 字体规范（字体大小、行高、字重）\n"
-                    "- 图标规范（尺寸、颜色、风格）\n"
-                    "- 阴影效果（elevation值）\n"
-                    "- 圆角值（cornerRadius）\n"
-                    "- 内外边距值（具体的dp值）\n\n"
-                    
-                    "4. 交互设计细节：\n"
-                    "- 可点击区域的范围和反馈效果\n"
-                    "- 状态变化（normal、pressed、disabled等）\n"
-                    "- 动画效果（转场、加载、反馈动画）\n"
-                    "- 手势操作（滑动、拖拽、缩放等）\n"
-                    "- 页面跳转和过渡方式\n\n"
-                    
-                    "5. 技术实现指导：\n"
-                    "- 布局实现方案（xml布局结构示例）\n"
-                    "- 自定义View的实现建议\n"
-                    "- 性能优化点（布局层级优化、视图缓存等）\n"
-                    "- 屏幕适配方案（不同尺寸、分辨率）\n"
-                    "- 无障碍支持建议\n\n"
-                    
-                    "请提供非常具体的分析，包括：\n"
-                    "1. 所有尺寸使用dp为单位\n"
-                    "2. 所有颜色使用十六进制值\n"
-                    "3. 布局层次使用缩进表示\n"
-                    "4. 组件的具体位置关系\n"
-                    "5. 完整的属性值列表\n"
-                )
-                
-                # 准备API调用
-                logger.info(f"开始调用vision model进行图片分析: {filename}")
-                try:
-                    response = self.vision_model.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
-                                    "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
-                                    "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
-                                )
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": analysis_prompt
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/{img_format};base64,{base64.b64encode(image_data).decode('utf-8')}"
-                                        }
+                    # 创建请求消息
+                    messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
+                                "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
+                                "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": analysis_prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/{img_format};base64,{base64_image}"
                                     }
-                                ]
-                            }
-                        ],
-                        max_tokens=3000,
-                        temperature=0.3
-                    )
-                    logger.info(f"Vision model调用成功: {filename}")
-                except Exception as e:
-                    logger.error(f"Vision model调用失败: {str(e)}", exc_info=True)
-                    raise ValueError(f"Vision model调用失败: {str(e)}")
-                
-                # 验证分析结果
-                analysis_text = response.choices[0].message.content
-                
-                if not analysis_text:
-                    logger.error(f"分析结果为空: {filename}")
-                    raise ValueError("分析结果为空")
-                elif len(analysis_text.strip()) < 100:
-                    logger.warning(f"分析结果过短 ({len(analysis_text.strip())}字符): {filename}")
-                    raise ValueError("分析结果过短")
-                
-                logger.info(f"成功获取分析结果 ({len(analysis_text.strip())}字符): {filename}")
+                                }
+                            ]
+                        }
+                    ]
                     
+                    logger.info("开始发送请求到OpenAI API")
+                    try:
+                        response = self.vision_model.chat.completions.create(
+                            model="gpt-4o",
+                            messages=messages,
+                            max_tokens=3000,
+                            temperature=0.3
+                        )
+                        logger.info(f"Vision model调用成功: {filename}")
+                        logger.info(f"响应ID: {response.id}, 模型: {response.model}, 使用token: {response.usage.total_tokens}")
+                        
+                        # 验证分析结果
+                        analysis_text = response.choices[0].message.content
+                        logger.info(f"获取到分析结果，长度: {len(analysis_text)} 字符")
+                        
+                        if not analysis_text:
+                            logger.error(f"分析结果为空: {filename}")
+                            analysis_text = self._generate_default_analysis(tech_stack, filename)
+                        elif len(analysis_text.strip()) < 100:
+                            logger.warning(f"分析结果过短 ({len(analysis_text.strip())}字符): {filename}")
+                            analysis_text = self._generate_default_analysis(tech_stack, filename)
+                        
+                        logger.info(f"成功获取分析结果 ({len(analysis_text.strip())}字符): {filename}")
+                    except Exception as api_error:
+                        logger.error(f"Vision model API调用失败: {str(api_error)}")
+                        import traceback
+                        logger.error(f"详细错误信息: {traceback.format_exc()}")
+                        analysis_text = self._generate_default_analysis(tech_stack, filename)
             except Exception as e:
                 logger.error(f"图片分析失败: {str(e)}")
-                analysis_text = f"设计图文件名: {filename}\n技术栈: {tech_stack}\n上传时间: {datetime.now().isoformat()}"
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                analysis_text = self._generate_default_analysis(tech_stack, filename)
             
             # 6. 添加到向量存储
             try:
@@ -232,7 +250,9 @@ class DesignImageProcessor:
                     
             except Exception as e:
                 logger.error(f"添加到向量存储失败: {str(e)}")
-                raise
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                # 继续执行，不要因为向量存储失败而中断整个流程
             
             logger.info(f"设计图处理完成: {filename}, ID: {file_id}")
             
@@ -249,12 +269,108 @@ class DesignImageProcessor:
             
         except Exception as e:
             logger.error(f"处理设计图失败: {str(e)}", exc_info=True)
+            # 如果文件已经保存，返回文件路径
+            file_path_str = str(file_path) if file_path else "未保存"
             return {
                 "success": False,
                 "error": str(e),
                 "filename": filename,
-                "tech_stack": tech_stack
+                "tech_stack": tech_stack,
+                "id": file_id,
+                "file_path": file_path_str
             }
+            
+    def _build_analysis_prompt(self, tech_stack: str) -> str:
+        """构建分析提示
+        
+        Args:
+            tech_stack: 技术栈
+            
+        Returns:
+            str: 分析提示
+        """
+        return (
+            f"你是一个专业的UI设计分析专家。请详细分析这个{tech_stack}应用界面设计图，"
+            "并按以下分类进行分析：\n\n"
+            
+            "1. 布局结构分析：\n"
+            "- 主要布局类型（如ConstraintLayout、LinearLayout、RelativeLayout等）\n"
+            "- 具体布局层次和嵌套关系\n"
+            "- 各组件的位置和对齐方式（顶部对齐、居中等）\n"
+            "- 页面整体结构（顶部导航、内容区、底部栏等）\n"
+            "- 响应式布局特征\n\n"
+            
+            "2. UI组件详细清单：\n"
+            "- 导航组件（Toolbar、TabLayout、BottomNavigationView等）\n"
+            "- 列表/网格组件（RecyclerView、GridView等）\n"
+            "- 基础组件（Button、TextView、ImageView等）\n"
+            "- 自定义组件\n"
+            "- 组件的具体属性（大小、边距、内边距等）\n\n"
+            
+            "3. 视觉设计规范：\n"
+            "- 主色调和辅助色（提供具体的色值，如#FFFFFF）\n"
+            "- 字体规范（字体大小、行高、字重）\n"
+            "- 图标规范（尺寸、颜色、风格）\n"
+            "- 阴影效果（elevation值）\n"
+            "- 圆角值（cornerRadius）\n"
+            "- 内外边距值（具体的dp值）\n\n"
+            
+            "4. 交互设计细节：\n"
+            "- 可点击区域的范围和反馈效果\n"
+            "- 状态变化（normal、pressed、disabled等）\n"
+            "- 动画效果（转场、加载、反馈动画）\n"
+            "- 手势操作（滑动、拖拽、缩放等）\n"
+            "- 页面跳转和过渡方式\n\n"
+            
+            "5. 技术实现指导：\n"
+            "- 布局实现方案（xml布局结构示例）\n"
+            "- 自定义View的实现建议\n"
+            "- 性能优化点（布局层级优化、视图缓存等）\n"
+            "- 屏幕适配方案（不同尺寸、分辨率）\n"
+            "- 无障碍支持建议\n\n"
+            
+            "请提供非常具体的分析，包括：\n"
+            "1. 所有尺寸使用dp为单位\n"
+            "2. 所有颜色使用十六进制值\n"
+            "3. 布局层次使用缩进表示\n"
+            "4. 组件的具体位置关系\n"
+            "5. 完整的属性值列表\n"
+        )
+        
+    def _generate_default_analysis(self, tech_stack: str, filename: str) -> str:
+        """生成默认分析结果
+        
+        Args:
+            tech_stack: 技术栈
+            filename: 文件名
+            
+        Returns:
+            str: 默认分析结果
+        """
+        return f"""基于{tech_stack}平台的界面分析：
+
+1. 布局结构分析：
+   - 请检查设计图文件是否正确上传
+   - 当前无法获取具体的设计图分析结果
+   - 文件名: {filename}
+
+2. UI组件和样式：
+   - 建议重新上传设计图
+   - 确保图片格式正确（支持jpg、png、webp）
+   - 图片大小不超过5MB
+
+3. 颜色主题：
+   - 暂时无法分析具体的颜色主题
+   - 建议使用{tech_stack}标准设计规范
+
+4. 交互设计：
+   - 暂时无法分析具体的交互设计
+   - 建议参考{tech_stack}官方交互指南
+
+5. 技术实现指导：
+   - 请确保网络连接正常
+   - 检查API密钥配置
+   - 如果问题持续，请联系技术支持"""
     
     def _split_analysis_sections(self, analysis_text: str) -> Dict[str, str]:
         """将分析文本拆分为不同的部分

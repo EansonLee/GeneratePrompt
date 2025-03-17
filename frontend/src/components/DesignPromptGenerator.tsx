@@ -191,14 +191,17 @@ const DesignPromptGenerator: React.FC = () => {
       
       const requestData = {
         tech_stack: techStack,
-        design_image_id: uploadResult.id,
-        design_image_path: uploadResult.file_path,
+        design_image_id: uploadResult.image_id,
+        design_image_path: uploadResult.image_path,
         rag_method: ragMethod,
         retriever_top_k: retrieverTopK,
         agent_type: agentType,
         temperature: temperature,
-        context_window_size: contextWindowSize
+        context_window_size: contextWindowSize,
+        prompt: "设计图Prompt生成请求"
       };
+      
+      console.log('发送请求数据:', JSON.stringify(requestData, null, 2));
       
       const response = await fetch(`${API_BASE_URL}/api/design/generate`, {
         method: 'POST',
@@ -212,12 +215,15 @@ const DesignPromptGenerator: React.FC = () => {
       });
       
       if (!response.ok) {
+        const errorText = await response.text();
+        console.error('请求失败:', response.status, response.statusText, errorText);
         throw new Error(`生成失败: ${response.status} ${response.statusText}`);
       }
       
       const result = await response.json();
-      setGeneratedPrompt(result.generated_prompt);
-      setEditedPrompt(result.generated_prompt);
+      console.log('接收到响应:', JSON.stringify(result, null, 2));
+      setGeneratedPrompt(result.generated_prompt || result.prompt);
+      setEditedPrompt(result.generated_prompt || result.prompt);
       setHasHistoryContext(result.has_history_context);
       setHistoryPrompts(result.history_prompts || []);
       setGenerationStatus({ status: 'completed' });
@@ -255,7 +261,7 @@ const DesignPromptGenerator: React.FC = () => {
       const requestData = {
         prompt: editedPrompt,
         tech_stack: techStack,
-        design_image_id: uploadResult.id
+        design_image_id: uploadResult.image_id
       };
       
       const response = await fetch(`${API_BASE_URL}/api/design/save`, {
@@ -366,7 +372,7 @@ const DesignPromptGenerator: React.FC = () => {
         {uploadResult && (
           <Alert 
             message="上传成功" 
-            description={`设计图ID: ${uploadResult.id}`} 
+            description={`设计图ID: ${uploadResult.image_id}`} 
             type="success" 
             showIcon 
             style={{ marginTop: '10px' }}

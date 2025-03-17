@@ -59,7 +59,7 @@ httpx>=0.27.0
 watchfiles>=0.21.0
 
 # Image Processing Dependencies
-Pillow>=10.2.0  # 用于图像处理，在design_image_processor.py中使用
+Pillow>=10.2.0  
 
 # Additional Dependencies
-unittest-mock>=1.3.0  # 用于测试，在vector_store.py中使用
+# unittest-mock>=1.3.0

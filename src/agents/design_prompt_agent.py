@@ -39,6 +39,7 @@ class DesignPromptState(TypedDict):
     generated_prompt: str  # 生成的Prompt
     next_step: str  # 下一步
     design_analysis: str  # 设计图分析结果
+    user_prompt: Optional[str]  # 用户提供的提示词
 
 # 定义系统提示模板
 SYSTEM_PROMPT = """你是一个专业的设计图Prompt生成专家，擅长将设计图转换为详细的开发提示词。
@@ -247,27 +248,64 @@ class DesignPromptAgent:
         """
         try:
             logger.info(f"开始分析设计图: {state['design_image_id']}")
+            logger.info(f"设计图路径: {state['design_image_path']}")
+            logger.info(f"技术栈: {state['tech_stack']}")
             
             # 验证设计图路径
             if not os.path.exists(state["design_image_path"]):
-                raise ValueError(f"设计图文件不存在: {state['design_image_path']}")
+                logger.error(f"设计图文件不存在: {state['design_image_path']}")
+                # 使用默认的分析结果
+                state["design_analysis"] = self._generate_default_analysis(state)
+                state["next_step"] = "generate_prompt"
+                return self._add_error_message(state, f"设计图文件不存在: {state['design_image_path']}")
+            else:
+                logger.info(f"设计图文件存在: {state['design_image_path']}")
+                file_size = os.path.getsize(state["design_image_path"])
+                logger.info(f"设计图文件大小: {file_size} 字节")
             
             # 读取图片数据
-            with open(state["design_image_path"], "rb") as f:
-                image_data = f.read()
+            try:
+                with open(state["design_image_path"], "rb") as f:
+                    image_data = f.read()
+                logger.info(f"成功读取图片数据，大小: {len(image_data)} 字节")
+            except Exception as read_error:
+                logger.error(f"读取图片数据失败: {str(read_error)}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                # 使用默认的分析结果
+                state["design_analysis"] = self._generate_default_analysis(state)
+                state["next_step"] = "generate_prompt"
+                return self._add_error_message(state, f"读取图片数据失败: {str(read_error)}")
             
             # 分析设计图
-            result = await self.design_processor.process_image(
-                image_data=image_data,
-                filename=os.path.basename(state["design_image_path"]),
-                tech_stack=state["tech_stack"]
-            )
+            try:
+                logger.info("开始调用 design_processor.process_image 方法")
+                result = await self.design_processor.process_image(
+                    image_content=image_data,
+                    filename=os.path.basename(state["design_image_path"]),
+                    tech_stack=state["tech_stack"]
+                )
+                logger.info(f"design_processor.process_image 方法调用完成，结果: {result.get('success', False)}")
+            except Exception as process_error:
+                logger.error(f"调用 design_processor.process_image 方法失败: {str(process_error)}")
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
+                # 使用默认的分析结果
+                state["design_analysis"] = self._generate_default_analysis(state)
+                state["next_step"] = "generate_prompt"
+                return self._add_error_message(state, f"调用 design_processor.process_image 方法失败: {str(process_error)}")
             
             if not result.get("success", False):
-                raise ValueError(result.get("error", "设计图分析失败"))
+                error_msg = result.get("error", "设计图分析失败")
+                logger.error(f"设计图分析失败: {error_msg}")
+                # 使用默认的分析结果
+                state["design_analysis"] = self._generate_default_analysis(state)
+                state["next_step"] = "generate_prompt"
+                return self._add_error_message(state, f"设计图分析失败: {error_msg}")
                 
             # 添加分析结果到状态
             state["design_analysis"] = result["analysis"]
+            logger.info(f"分析结果长度: {len(result['analysis'])} 字符")
             
             # 添加系统消息
             messages = state.get("messages", [])
@@ -292,11 +330,30 @@ class DesignPromptAgent:
             logger.error(f"详细错误信息: {traceback.format_exc()}")
             
             # 使用默认的分析结果
-            default_analysis = f"""基于{state['tech_stack']}平台的界面分析：
+            state["design_analysis"] = self._generate_default_analysis(state)
+            state["next_step"] = "generate_prompt"
+            return self._add_error_message(state, f"分析设计图失败: {str(e)}")
+            
+    def _generate_default_analysis(self, state: DesignPromptState) -> str:
+        """生成默认分析结果
+        
+        Args:
+            state: 当前状态
+            
+        Returns:
+            str: 默认分析结果
+        """
+        tech_stack = state["tech_stack"]
+        design_image_path = state["design_image_path"]
+        filename = os.path.basename(design_image_path)
+        
+        return f"""基于{tech_stack}平台的界面分析：
 
 1. 页面整体布局和结构：
    - 请检查设计图文件是否正确上传
    - 当前无法获取具体的设计图分析结果
+   - 文件名: {filename}
+   - 文件路径: {design_image_path}
 
 2. UI组件和样式：
    - 建议重新上传设计图
@@ -305,30 +362,38 @@ class DesignPromptAgent:
 
 3. 颜色主题：
    - 暂时无法分析具体的颜色主题
-   - 建议使用{state['tech_stack']}标准设计规范
+   - 建议使用{tech_stack}标准设计规范
 
 4. 交互设计：
    - 暂时无法分析具体的交互设计
-   - 建议参考{state['tech_stack']}官方交互指南
+   - 建议参考{tech_stack}官方交互指南
 
 5. 注意事项：
    - 请确保网络连接正常
    - 检查API密钥配置
    - 如果问题持续，请联系技术支持"""
+   
+    def _add_error_message(self, state: DesignPromptState, error_message: str) -> DesignPromptState:
+        """添加错误消息到状态
+        
+        Args:
+            state: 当前状态
+            error_message: 错误消息
             
-            state["design_analysis"] = default_analysis
-            messages = state.get("messages", [])
-            messages.append({
-                "role": "system",
-                "content": f"分析设计图失败: {str(e)}\n使用默认分析模板。"
-            })
-            messages.append({
-                "role": "assistant",
-                "content": default_analysis
-            })
-            state["messages"] = messages
-            state["next_step"] = "generate_prompt"
-            return state
+        Returns:
+            DesignPromptState: 更新后的状态
+        """
+        messages = state.get("messages", [])
+        messages.append({
+            "role": "system",
+            "content": f"分析设计图失败: {error_message}\n使用默认分析模板。"
+        })
+        messages.append({
+            "role": "assistant",
+            "content": state["design_analysis"]
+        })
+        state["messages"] = messages
+        return state
     
     async def _generate_prompt(self, state: DesignPromptState) -> DesignPromptState:
         """生成Prompt
@@ -381,6 +446,10 @@ class DesignPromptAgent:
             # 如果有历史Prompt，添加到系统提示中
             if history_prompts_text:
                 system_prompt += "\n\n历史Prompt参考：\n{history_prompts}"
+                
+            # 如果有用户提供的提示词，添加到系统提示中
+            if state.get("user_prompt"):
+                system_prompt += f"\n\n用户提供的额外指导：\n{state['user_prompt']}"
             
             prompt = ChatPromptTemplate.from_template(system_prompt).format(
                 tech_stack=state["tech_stack"],
@@ -479,7 +548,8 @@ class DesignPromptAgent:
         retriever_top_k: int = 3,
         agent_type: str = "ReActAgent",
         temperature: float = 0.7,
-        context_window_size: int = 4000
+        context_window_size: int = 4000,
+        prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """生成设计图Prompt
         
@@ -492,6 +562,7 @@ class DesignPromptAgent:
             agent_type: Agent类型
             temperature: 温度
             context_window_size: 上下文窗口大小
+            prompt: 用户提供的提示词
             
         Returns:
             Dict[str, Any]: 生成结果
@@ -512,7 +583,8 @@ class DesignPromptAgent:
                 context_window_size=context_window_size,
                 generated_prompt="",
                 next_step="retrieve_similar_designs",
-                design_analysis=""
+                design_analysis="",
+                user_prompt=prompt
             )
             
             # 执行工作流
