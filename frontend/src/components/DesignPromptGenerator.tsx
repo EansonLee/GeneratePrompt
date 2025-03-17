@@ -7,6 +7,7 @@ import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, CopyOutlin
 import type { UploadFile, UploadProps } from 'antd/es/upload/interface';
 import { API_BASE_URL } from '../config';
 import ReactMarkdown from 'react-markdown';
+import copy from 'copy-to-clipboard';
 
 const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
@@ -624,6 +625,37 @@ const DesignPromptGenerator: React.FC = () => {
     );
   };
   
+  // 复制文本到剪贴板的函数
+  const copyToClipboard = (text: string) => {
+    try {
+      // 优先使用navigator.clipboard API
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text)
+          .then(() => message.success('已复制到剪贴板'))
+          .catch(() => {
+            // 如果navigator.clipboard失败，使用copy-to-clipboard库
+            const success = copy(text);
+            if (success) {
+              message.success('已复制到剪贴板');
+            } else {
+              message.error('复制失败，请手动复制');
+            }
+          });
+      } else {
+        // 直接使用copy-to-clipboard库
+        const success = copy(text);
+        if (success) {
+          message.success('已复制到剪贴板');
+        } else {
+          message.error('复制失败，请手动复制');
+        }
+      }
+    } catch (error) {
+      console.error('复制失败:', error);
+      message.error('复制失败，请手动复制');
+    }
+  };
+  
   return (
     <div style={{ padding: '20px' }}>
       <Title level={2}>设计图Prompt生成</Title>
@@ -807,10 +839,7 @@ const DesignPromptGenerator: React.FC = () => {
                         <Button 
                           type="text" 
                           icon={<CopyOutlined />} 
-                          onClick={() => {
-                            navigator.clipboard.writeText(generatedPrompt);
-                            message.success('已复制到剪贴板');
-                          }}
+                          onClick={() => copyToClipboard(generatedPrompt)}
                         >
                           复制全文
                         </Button>
