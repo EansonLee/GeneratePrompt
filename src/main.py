@@ -1,3 +1,8 @@
+"""
+警告：此文件已被弃用，请使用 src/api/main.py 作为API入口点。
+所有功能已被合并到 src/api/main.py 中。
+"""
+
 """主程序入口模块"""
 
 import logging

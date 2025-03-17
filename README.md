@@ -272,12 +272,8 @@ python scripts/start.py  # 直接启动服务
 2. 分步调试：
    ```bash
    # 后端调试（支持热重载）
-   cd src/api
-   uvicorn main:app --reload --port 8000
+   python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
    
-   # 后端调试（支持热重载）
-   python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-
    # 前端调试（支持热重载）
    cd frontend
    npm start
@@ -364,4 +360,14 @@ python scripts/start.py  # 直接启动服务
 
 ## 许可证
 
-MIT License - 详见 LICENSE 文件 
+MIT License - 详见 LICENSE 文件
+
+## 开发调试
+
+### 后端调试
+如需单独启动后端服务进行调试，可以使用以下命令：
+
+```bash
+# 在项目根目录下执行
+python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
+``` 

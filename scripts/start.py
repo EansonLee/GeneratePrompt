@@ -101,8 +101,8 @@ def start_backend():
         # 使用当前Python解释器的完整路径
         python_path = sys.executable
         backend_process = subprocess.Popen(
-            [python_path, "-m", "uvicorn", "main:app", "--reload"],
-            cwd=project_root / "src" / "api"
+            [python_path, "-m", "uvicorn", "src.api.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"],
+            cwd=project_root
         )
         print("[成功] 后端服务启动成功")
         return backend_process
