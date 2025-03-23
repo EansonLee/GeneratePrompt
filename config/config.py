@@ -59,6 +59,16 @@ class Config:
         return os.getenv("OPENAI_BASE_URL", "https://api.fastapi.ai/v1")
     
     @property
+    def OPENAI_TIMEOUT(self) -> float:
+        """获取OpenAI API调用超时时间（秒）"""
+        timeout_str = os.getenv("OPENAI_TIMEOUT", "60.0")
+        try:
+            return float(timeout_str)
+        except ValueError:
+            logger.warning(f"OPENAI_TIMEOUT值无效: {timeout_str}，使用默认值60.0")
+            return 60.0
+    
+    @property
     def OPENAI_MODEL(self) -> str:
         """OpenAI模型名称"""
         return os.getenv("OPENAI_MODEL", "gpt-4")
@@ -72,6 +82,11 @@ class Config:
     def EMBEDDING_MODEL(self) -> str:
         """嵌入模型名称"""
         return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    
+    @property
+    def DESIGN_PROMPT_MODEL(self) -> str:
+        """获取设计提示词生成模型"""
+        return os.getenv("DESIGN_PROMPT_MODEL", self.OPENAI_MODEL)
     
     @property
     def MODEL_CONFIG(self) -> Dict[str, Any]:
@@ -215,10 +230,10 @@ class Config:
     def API_CONFIG(self) -> Dict[str, Any]:
         """API配置"""
         return {
-            "title": "Prompt Generator API",
-            "description": "用于生成和优化Prompt的API服务",
-            "version": "1.0.0",
-            "cors_origins": ["*"],  # 允许所有来源，生产环境中应该限制
+            "title": "提示词生成 API",
+            "description": "用于生成和优化提示词的 API",
+            "version": "0.1.0",
+            "cors_origins": ["*"],  # 允许所有来源，生产环境应该限制
             "cors_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "cors_headers": ["*"],
         }
@@ -316,6 +331,19 @@ class Config:
     PROMPT_OPTIMIZATION_SYSTEM_PROMPT: str = """你是一个专业的prompt优化助手。
 你的任务是优化用户提供的prompt，使其更加清晰、具体、有效。
 请分析用户的prompt，并提供一个优化后的版本。"""
+
+    @property
+    def VISION_MODEL(self) -> str:
+        """视觉模型名称"""
+        return os.getenv("VISION_MODEL", "gpt-4o")
+
+    @property
+    def VISION_MODEL_CONFIG(self) -> Dict[str, Any]:
+        """视觉模型配置"""
+        return {
+            "temperature": safe_float(os.getenv("VISION_MODEL_TEMPERATURE", "0.3"), 0.3),
+            "max_tokens": safe_int(os.getenv("VISION_MODEL_MAX_TOKENS", "3000"), 3000)
+        }
 
     def get_logging_config(self) -> Dict[str, Any]:
         """获取日志配置"""

@@ -9,6 +9,8 @@ from PIL import Image
 import io
 import numpy as np
 import json
+import hashlib
+import time
 
 from config.config import settings
 from src.utils.vector_store import VectorStore
@@ -18,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 class DesignImageProcessor:
     """设计图处理器，用于处理上传的设计图并生成向量"""
+    
+    # 添加缓存相关的类变量
+    _analysis_cache = {}  # 内存缓存：图像哈希 -> 分析结果
+    _analysis_cache_file = None  # 缓存文件路径
+    _cache_expiry = 7 * 24 * 60 * 60  # 缓存过期时间（7天）
+    _max_cache_size = 100  # 最大缓存条目数
     
     def __init__(self, vector_store: Optional[VectorStore] = None):
         """初始化设计图处理器
@@ -37,7 +45,99 @@ class DesignImageProcessor:
         # 确保上传目录存在
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"设计图处理器初始化完成，上传目录: {self.upload_dir}")
+        # 初始化缓存文件路径
+        if DesignImageProcessor._analysis_cache_file is None:
+            DesignImageProcessor._analysis_cache_file = Path(settings.VECTOR_DB_PATH) / "design_analysis_cache.json"
+            self._load_analysis_cache()
+        
+        # 记录使用的视觉模型
+        vision_model = settings.VISION_MODEL
+        vision_temp = settings.VISION_MODEL_CONFIG["temperature"]
+        vision_max_tokens = settings.VISION_MODEL_CONFIG["max_tokens"]
+        logger.info(f"设计图处理器初始化完成，使用视觉模型: {vision_model}, 温度: {vision_temp}, 最大tokens: {vision_max_tokens}")
+        logger.info(f"上传目录: {self.upload_dir}")
+    
+    def _load_analysis_cache(self):
+        """加载分析结果缓存"""
+        try:
+            if DesignImageProcessor._analysis_cache_file.exists():
+                with open(DesignImageProcessor._analysis_cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    # 过滤掉过期的缓存项
+                    current_time = time.time()
+                    DesignImageProcessor._analysis_cache = {
+                        k: v for k, v in cache_data.items()
+                        if current_time - v.get('timestamp', 0) < self._cache_expiry
+                    }
+                logger.info(f"加载了 {len(DesignImageProcessor._analysis_cache)} 个设计图分析缓存")
+            else:
+                logger.info("没有找到设计图分析缓存文件，将创建新缓存")
+                DesignImageProcessor._analysis_cache = {}
+        except Exception as e:
+            logger.error(f"加载设计图分析缓存失败: {str(e)}")
+            DesignImageProcessor._analysis_cache = {}
+    
+    def _save_analysis_cache(self):
+        """保存分析结果缓存"""
+        try:
+            # 确保目录存在
+            DesignImageProcessor._analysis_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(DesignImageProcessor._analysis_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(DesignImageProcessor._analysis_cache, f, ensure_ascii=False)
+            logger.info(f"已保存 {len(DesignImageProcessor._analysis_cache)} 个设计图分析缓存")
+        except Exception as e:
+            logger.error(f"保存设计图分析缓存失败: {str(e)}")
+    
+    def _compute_image_hash(self, image_data: bytes) -> str:
+        """计算图像内容哈希值
+        
+        Args:
+            image_data: 图像数据
+            
+        Returns:
+            str: 图像哈希值
+        """
+        return hashlib.md5(image_data).hexdigest()
+    
+    def _prune_cache_if_needed(self):
+        """如果缓存大小超过限制，清理最旧的缓存项"""
+        if len(DesignImageProcessor._analysis_cache) > self._max_cache_size:
+            # 按时间戳排序
+            sorted_items = sorted(
+                DesignImageProcessor._analysis_cache.items(),
+                key=lambda x: x[1].get('timestamp', 0)
+            )
+            # 移除最旧的项，直到缓存大小符合限制
+            items_to_remove = len(sorted_items) - self._max_cache_size
+            for i in range(items_to_remove):
+                del DesignImageProcessor._analysis_cache[sorted_items[i][0]]
+            logger.info(f"清理了 {items_to_remove} 个旧的缓存项")
+    
+    def is_supported_image(self, filename: str) -> bool:
+        """检查文件是否为支持的图片格式
+        
+        Args:
+            filename: 文件名
+            
+        Returns:
+            bool: 是否支持
+        """
+        try:
+            # 获取文件扩展名并转为小写
+            ext = Path(filename).suffix.lower().lstrip('.')
+            
+            # 检查扩展名是否在支持列表中
+            supported_formats = ['jpeg', 'jpg', 'png', 'webp']
+            is_supported = ext in supported_formats
+            
+            if not is_supported:
+                logger.warning(f"不支持的图片格式: {ext}")
+            
+            return is_supported
+            
+        except Exception as e:
+            logger.error(f"检查图片格式失败: {str(e)}")
+            return False
     
     async def process_image(
         self, 
@@ -105,122 +205,155 @@ class DesignImageProcessor:
             }
             logger.info(f"元数据准备完成: {json.dumps(full_metadata, ensure_ascii=False)}")
             
-            # 5. 使用多模态模型分析图片
-            try:
-                # 构建详细的分析提示
-                analysis_prompt = (
-                    f"你是一个专业的UI设计分析专家。请详细分析这个{tech_stack}应用界面设计图，"
-                    "并按以下分类进行分析：\n\n"
-                    
-                    "1. 布局结构分析：\n"
-                    "- 主要布局类型（如ConstraintLayout、LinearLayout、RelativeLayout等）\n"
-                    "- 具体布局层次和嵌套关系\n"
-                    "- 各组件的位置和对齐方式（顶部对齐、居中等）\n"
-                    "- 页面整体结构（顶部导航、内容区、底部栏等）\n"
-                    "- 响应式布局特征\n\n"
-                    
-                    "2. UI组件详细清单：\n"
-                    "- 导航组件（Toolbar、TabLayout、BottomNavigationView等）\n"
-                    "- 列表/网格组件（RecyclerView、GridView等）\n"
-                    "- 基础组件（Button、TextView、ImageView等）\n"
-                    "- 自定义组件\n"
-                    "- 组件的具体属性（大小、边距、内边距等）\n\n"
-                    
-                    "3. 视觉设计规范：\n"
-                    "- 主色调和辅助色（提供具体的色值，如#FFFFFF）\n"
-                    "- 字体规范（字体大小、行高、字重）\n"
-                    "- 图标规范（尺寸、颜色、风格）\n"
-                    "- 阴影效果（elevation值）\n"
-                    "- 圆角值（cornerRadius）\n"
-                    "- 内外边距值（具体的dp值）\n\n"
-                    
-                    "4. 交互设计细节：\n"
-                    "- 可点击区域的范围和反馈效果\n"
-                    "- 状态变化（normal、pressed、disabled等）\n"
-                    "- 动画效果（转场、加载、反馈动画）\n"
-                    "- 手势操作（滑动、拖拽、缩放等）\n"
-                    "- 页面跳转和过渡方式\n\n"
-                    
-                    "5. 技术实现指导：\n"
-                    "- 布局实现方案（xml布局结构示例）\n"
-                    "- 自定义View的实现建议\n"
-                    "- 性能优化点（布局层级优化、视图缓存等）\n"
-                    "- 屏幕适配方案（不同尺寸、分辨率）\n"
-                    "- 无障碍支持建议\n\n"
-                    
-                    "请提供非常具体的分析，包括：\n"
-                    "1. 所有尺寸使用dp为单位\n"
-                    "2. 所有颜色使用十六进制值\n"
-                    "3. 布局层次使用缩进表示\n"
-                    "4. 组件的具体位置关系\n"
-                    "5. 完整的属性值列表\n"
-                )
-                
-                # 准备API调用
-                logger.info(f"开始调用vision model进行图片分析: {filename}")
-                try:
-                    response = self.vision_model.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
-                                    "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
-                                    "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
-                                )
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": analysis_prompt
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/{img_format};base64,{base64.b64encode(image_data).decode('utf-8')}"
-                                        }
-                                    }
-                                ]
-                            }
-                        ],
-                        max_tokens=3000,
-                        temperature=0.3
-                    )
-                    logger.info(f"Vision model调用成功: {filename}")
-                except Exception as e:
-                    logger.error(f"Vision model调用失败: {str(e)}", exc_info=True)
-                    raise ValueError(f"Vision model调用失败: {str(e)}")
-                
-                # 验证分析结果
-                analysis_text = response.choices[0].message.content
-                
-                if not analysis_text:
-                    logger.error(f"分析结果为空: {filename}")
-                    raise ValueError("分析结果为空")
-                elif len(analysis_text.strip()) < 100:
-                    logger.warning(f"分析结果过短 ({len(analysis_text.strip())}字符): {filename}")
-                    raise ValueError("分析结果过短")
-                
-                logger.info(f"成功获取分析结果 ({len(analysis_text.strip())}字符): {filename}")
-                    
-            except Exception as e:
-                logger.error(f"图片分析失败: {str(e)}")
-                analysis_text = f"设计图文件名: {filename}\n技术栈: {tech_stack}\n上传时间: {datetime.now().isoformat()}"
+            # 5. 计算图像哈希，用于缓存查找
+            image_hash = self._compute_image_hash(image_data)
+            logger.info(f"图像哈希值: {image_hash}")
             
-            # 6. 添加到向量存储
-            try:
-                # 将分析结果按类别拆分
-                analysis_sections = self._split_analysis_sections(analysis_text)
-                logger.info(f"分析结果已按类别拆分: {list(analysis_sections.keys())}")
+            # 6. 检查缓存中是否有分析结果
+            analysis_text = None
+            cache_hit = False
+            if image_hash in DesignImageProcessor._analysis_cache:
+                cache_entry = DesignImageProcessor._analysis_cache[image_hash]
+                # 检查是否过期
+                if time.time() - cache_entry.get('timestamp', 0) < self._cache_expiry:
+                    analysis_text = cache_entry.get('analysis_text')
+                    analysis_sections = cache_entry.get('analysis_sections', {})
+                    if analysis_text:
+                        logger.info(f"使用缓存的设计图分析结果: {image_hash}")
+                        cache_hit = True
+            
+            # 7. 如果缓存中没有，使用多模态模型分析图片
+            if not cache_hit:
+                try:
+                    # 构建详细的分析提示
+                    analysis_prompt = (
+                        f"你是一个专业的UI设计分析专家。请详细分析这个{tech_stack}应用界面设计图，"
+                        "并按以下分类进行分析：\n\n"
+                        
+                        "1. 布局结构分析：\n"
+                        "- 主要布局类型（如ConstraintLayout、LinearLayout、RelativeLayout等）\n"
+                        "- 具体布局层次和嵌套关系\n"
+                        "- 各组件的位置和对齐方式（顶部对齐、居中等）\n"
+                        "- 页面整体结构（顶部导航、内容区、底部栏等）\n"
+                        "- 响应式布局特征\n\n"
+                        
+                        "2. UI组件详细清单：\n"
+                        "- 导航组件（Toolbar、TabLayout、BottomNavigationView等）\n"
+                        "- 列表/网格组件（RecyclerView、GridView等）\n"
+                        "- 基础组件（Button、TextView、ImageView等）\n"
+                        "- 自定义组件\n"
+                        "- 组件的具体属性（大小、边距、内边距等）\n\n"
+                        
+                        "3. 视觉设计规范：\n"
+                        "- 主色调和辅助色（提供具体的色值，如#FFFFFF）\n"
+                        "- 字体规范（字体大小、行高、字重）\n"
+                        "- 图标规范（尺寸、颜色、风格）\n"
+                        "- 阴影效果（elevation值）\n"
+                        "- 圆角值（cornerRadius）\n"
+                        "- 内外边距值（具体的dp值）\n\n"
+                        
+                        "4. 交互设计细节：\n"
+                        "- 可点击区域的范围和反馈效果\n"
+                        "- 状态变化（normal、pressed、disabled等）\n"
+                        "- 动画效果（转场、加载、反馈动画）\n"
+                        "- 手势操作（滑动、拖拽、缩放等）\n"
+                        "- 页面跳转和过渡方式\n\n"
+                        
+                        "5. 技术实现指导：\n"
+                        "- 布局实现方案（xml布局结构示例）\n"
+                        "- 自定义View的实现建议\n"
+                        "- 性能优化点（布局层级优化、视图缓存等）\n"
+                        "- 屏幕适配方案（不同尺寸、分辨率）\n"
+                        "- 无障碍支持建议\n\n"
+                        
+                        "请提供非常具体的分析，包括：\n"
+                        "1. 所有尺寸使用dp为单位\n"
+                        "2. 所有颜色使用十六进制值\n"
+                        "3. 布局层次使用缩进表示\n"
+                        "4. 组件的具体位置关系\n"
+                        "5. 完整的属性值列表\n"
+                    )
+                    
+                    # 准备API调用
+                    logger.info(f"开始调用vision model进行图片分析: {filename}")
+                    try:
+                        response = self.vision_model.chat.completions.create(
+                            model=settings.VISION_MODEL,
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
+                                        "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
+                                        "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
+                                    )
+                                },
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": analysis_prompt
+                                        },
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": f"data:image/{img_format};base64,{base64.b64encode(image_data).decode('utf-8')}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            ],
+                            max_tokens=settings.VISION_MODEL_CONFIG["max_tokens"],
+                            temperature=settings.VISION_MODEL_CONFIG["temperature"]
+                        )
+                        logger.info(f"Vision model ({settings.VISION_MODEL}) 调用成功: {filename}")
+                    except Exception as e:
+                        logger.error(f"Vision model ({settings.VISION_MODEL}) 调用失败: {str(e)}", exc_info=True)
+                        raise ValueError(f"Vision model调用失败: {str(e)}")
+                    
+                    # 验证分析结果
+                    analysis_text = response.choices[0].message.content
+                    
+                    if not analysis_text:
+                        logger.error(f"分析结果为空: {filename}")
+                        raise ValueError("分析结果为空")
+                    elif len(analysis_text.strip()) < 100:
+                        logger.warning(f"分析结果过短 ({len(analysis_text.strip())}字符): {filename}")
+                        raise ValueError("分析结果过短")
+                    
+                    logger.info(f"成功获取分析结果 ({len(analysis_text.strip())}字符): {filename}")
+                        
+                except Exception as e:
+                    logger.error(f"图片分析失败: {str(e)}")
+                    analysis_text = f"设计图文件名: {filename}\n技术栈: {tech_stack}\n上传时间: {datetime.now().isoformat()}"
+            
+            # 8. 将分析结果按类别拆分
+            analysis_sections = self._split_analysis_sections(analysis_text)
+            
+            # 9. 如果是新分析的结果，添加到缓存
+            if not cache_hit:
+                # 保存分析结果到缓存
+                DesignImageProcessor._analysis_cache[image_hash] = {
+                    'analysis_text': analysis_text,
+                    'analysis_sections': analysis_sections,
+                    'tech_stack': tech_stack,
+                    'timestamp': time.time()
+                }
+                # 清理缓存（如果需要）
+                self._prune_cache_if_needed()
+                # 保存缓存到磁盘
+                self._save_analysis_cache()
+                logger.info(f"已将分析结果添加到缓存: {image_hash}")
                 
+            # 10. 添加到向量存储
+            try:
                 # 为每个部分创建单独的向量
                 for section_type, section_text in analysis_sections.items():
                     section_metadata = {
                         **full_metadata,
-                        "section_type": section_type
+                        "section_type": section_type,
+                        "image_hash": image_hash  # 添加图像哈希到元数据，便于后续查找
                     }
                     
                     await self.vector_store.add_texts(
@@ -244,6 +377,9 @@ class DesignImageProcessor:
                 "tech_stack": tech_stack,
                 "analysis": analysis_text,
                 "analysis_sections": analysis_sections,
+                "image_hash": image_hash,
+                "cache_hit": cache_hit,
+                "image_dimensions": img.size,
                 "success": True
             }
             
@@ -371,4 +507,98 @@ class DesignImageProcessor:
             
         except Exception as e:
             logger.error(f"搜索相似设计图失败: {str(e)}")
-            return [] 
+            return []
+
+    async def analyze_design_image(self, image_path: str, tech_stack: str) -> Dict[str, Any]:
+        """分析设计图
+        
+        Args:
+            image_path: 设计图路径
+            tech_stack: 技术栈
+            
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        try:
+            # 读取图片
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            
+            # 获取文件名和格式
+            filename = os.path.basename(image_path)
+            img_format = os.path.splitext(filename)[1][1:].lower()
+            
+            # 构建分析提示
+            analysis_prompt = f"""
+            请分析这个UI设计图，并提供以下信息：
+            
+            1. 布局结构：描述整体布局、主要区域和组件排列
+            2. UI组件：识别所有UI组件（按钮、输入框、列表等）
+            3. 颜色方案：提取主要颜色及其用途
+            4. 字体和排版：描述字体大小、样式和文本排版
+            5. 交互元素：识别可交互的元素及其可能的行为
+            6. 技术实现建议：基于{tech_stack}技术栈的实现建议
+            
+            请提供详细、准确、可实现的分析结果。
+            """
+            
+            # 使用视觉模型分析图片
+            try:
+                # 记录使用的视觉模型信息
+                vision_model = settings.VISION_MODEL
+                vision_temp = settings.VISION_MODEL_CONFIG["temperature"]
+                vision_max_tokens = settings.VISION_MODEL_CONFIG["max_tokens"]
+                logger.info(f"使用视觉模型 {vision_model} 分析设计图: {filename}")
+                
+                response = self.vision_model.chat.completions.create(
+                    model=vision_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
+                                "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
+                                "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": analysis_prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/{img_format};base64,{base64.b64encode(image_data).decode('utf-8')}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=vision_max_tokens,
+                    temperature=vision_temp
+                )
+                logger.info(f"视觉模型 {vision_model} 分析完成: {filename}, 使用温度: {vision_temp}, 最大tokens: {vision_max_tokens}")
+                
+                # 提取分析结果
+                analysis_result = response.choices[0].message.content
+                
+                # 构建结果
+                result = {
+                    "filename": filename,
+                    "tech_stack": tech_stack,
+                    "analysis": analysis_result,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"视觉模型 {settings.VISION_MODEL} 分析失败: {str(e)}", exc_info=True)
+                raise ValueError(f"视觉模型分析失败: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"分析设计图失败: {str(e)}", exc_info=True)
+            raise 

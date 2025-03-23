@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Button, Card, Input, Upload, message, Select, Slider, Tabs, 
-  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse 
+  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse, Checkbox, Tooltip 
 } from 'antd';
-import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined } from '@ant-design/icons';
+import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd/es/upload/interface';
 import { API_BASE_URL } from '../config';
 
@@ -11,6 +11,7 @@ const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
 const { TabPane } = Tabs;
 const { Option } = Select;
+const { Panel } = Collapse;
 
 // 支持的图片类型
 const SUPPORTED_IMAGE_FORMATS = [
@@ -133,6 +134,12 @@ const DesignPromptGenerator: React.FC = () => {
     }
   };
   
+  // 在状态定义部分添加跳过缓存选项
+  const [skipCache, setSkipCache] = useState<boolean>(false);
+  
+  // 在RAG和Agent参数状态下方添加错误信息状态
+  const [errorDetails, setErrorDetails] = useState<any>(null);
+  
   // 上传设计图
   const handleUploadDesign = async () => {
     if (!designImage?.originFileObj) {
@@ -188,48 +195,185 @@ const DesignPromptGenerator: React.FC = () => {
       setGenerationStatus({ status: 'processing' });
       setFullScreenLoading(true);
       setLoadingMessage('正在生成Prompt...');
+      setErrorDetails(null); // 清除之前的错误详情
       
       const requestData = {
         tech_stack: techStack,
-        design_image_id: uploadResult.id,
-        design_image_path: uploadResult.file_path,
+        design_image_id: uploadResult.image_id,
+        design_image_path: uploadResult.image_path,
         rag_method: ragMethod,
         retriever_top_k: retrieverTopK,
         agent_type: agentType,
         temperature: temperature,
-        context_window_size: contextWindowSize
+        context_window_size: contextWindowSize,
+        skip_cache: skipCache // 添加跳过缓存参数
       };
       
-      const response = await fetch(`${API_BASE_URL}/api/design/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(requestData),
-        mode: 'cors',
-        cache: 'no-cache'
-      });
+      // 添加前端重试逻辑
+      const maxRetries = 2; // 前端最多重试2次
+      let retryCount = 0;
+      let response;
+      let errorOccurred = false;
       
-      if (!response.ok) {
-        throw new Error(`生成失败: ${response.status} ${response.statusText}`);
+      while (retryCount <= maxRetries) {
+        try {
+          if (retryCount > 0) {
+            setLoadingMessage(`正在生成Prompt...（第${retryCount}次重试）`);
+            console.log(`第${retryCount}次重试生成Prompt`);
+            // 重试前等待一段时间（指数退避）
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retryCount - 1)));
+          }
+          
+          response = await fetch(`${API_BASE_URL}/api/design/generate`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify(requestData),
+            mode: 'cors',
+            cache: 'no-cache'
+          });
+          
+          if (response.ok) {
+            // 成功响应，跳出重试循环
+            errorOccurred = false;
+            break;
+          }
+          
+          // 判断是否是500内部错误或422错误（可能是临时性的）
+          if (response.status === 500 || response.status === 422) {
+            const errorData = await response.json().catch(() => ({}));
+            // 如果是OpenAI的内部错误，尝试重试
+            if ((errorData?.error?.message?.toLowerCase().includes('internal error') ||
+                errorData?.detail?.message?.toLowerCase().includes('internal error') ||
+                errorData?.detail?.error_type === 'OPENAI_INTERNAL_ERROR')) {
+              
+              // 保存错误详情以供显示
+              setErrorDetails(errorData?.detail || errorData);
+              
+              errorOccurred = true;
+              retryCount++;
+              console.log('检测到OpenAI API内部错误，准备重试', errorData);
+              
+              if (retryCount <= maxRetries) {
+                continue; // 继续下一次重试
+              }
+            }
+          }
+          
+          // 其他错误或重试次数已用完，跳出循环
+          errorOccurred = true;
+          break;
+          
+        } catch (error) {
+          console.error(`Prompt生成请求失败 (尝试 ${retryCount + 1}/${maxRetries + 1})`, error);
+          errorOccurred = true;
+          retryCount++;
+          
+          if (retryCount <= maxRetries) {
+            continue; // 继续下一次重试
+          }
+          break;
+        }
       }
       
+      // 处理所有重试后的结果
+      if (errorOccurred || !response || !response.ok) {
+        // 所有重试都失败了
+        if (!response) {
+          throw new Error('无法连接到服务器，请检查网络连接');
+        }
+        
+        const errorData = await response.json().catch(() => null);
+        let errorMessage = "";
+        
+        if (errorData) {
+          // 保存详细错误信息供显示
+          setErrorDetails(errorData?.detail || errorData);
+          
+          if (errorData.detail && typeof errorData.detail === 'object') {
+            // 处理结构化错误信息
+            errorMessage = errorData.detail.message || JSON.stringify(errorData.detail);
+          } else if (errorData.detail) {
+            // 字符串形式的错误信息
+            errorMessage = errorData.detail;
+          } else if (errorData.message) {
+            // 一般的消息字段
+            errorMessage = errorData.message;
+          } else if (errorData.error && errorData.error.message) {
+            // 嵌套的错误对象
+            errorMessage = errorData.error.message;
+          } else {
+            // 尝试将整个对象转为字符串
+            errorMessage = JSON.stringify(errorData);
+          }
+        }
+        
+        if (!errorMessage) {
+          errorMessage = `生成失败: ${response.status} ${response.statusText}`;
+        }
+        
+        // 对于OpenAI的内部错误，提供更友好的提示
+        if (errorMessage.toLowerCase().includes('internal error') || 
+            response.status === 500 || 
+            (errorData?.detail?.error_type === 'OPENAI_INTERNAL_ERROR')) {
+          errorMessage = `OpenAI API服务器内部错误。这通常是暂时性问题，请尝试以下解决方案：
+1. 勾选"跳过缓存"选项重试
+2. 等待几分钟后再试
+3. 联系管理员检查API密钥配置
+
+详细信息: ${errorMessage}`;
+        }
+        
+        throw new Error(errorMessage);
+      }
+      
+      // 成功获取结果
       const result = await response.json();
       setGeneratedPrompt(result.generated_prompt);
       setEditedPrompt(result.generated_prompt);
       setHasHistoryContext(result.has_history_context);
       setHistoryPrompts(result.history_prompts || []);
       setGenerationStatus({ status: 'completed' });
-      message.success('Prompt生成成功');
+      
+      // 显示缓存状态
+      const cacheHit = result.cache_hit || false;
+      if (cacheHit) {
+        message.success('Prompt生成成功 (使用缓存)');
+      } else {
+        message.success('Prompt生成成功');
+      }
+      
+      // 记录环境检查信息
+      if (result.env_check) {
+        console.log('环境变量检查结果:', result.env_check);
+      }
       
     } catch (error) {
       console.error('生成Prompt失败:', error);
+      let errorMessage = error instanceof Error ? error.message : '未知错误';
+      
+      // 增加更多的错误信息详情输出到控制台，帮助调试
+      console.error('错误详情:', error);
+      
       setGenerationStatus({ 
         status: 'error', 
-        message: error instanceof Error ? error.message : '生成失败' 
+        message: errorMessage
       });
-      message.error(`生成Prompt失败: ${error instanceof Error ? error.message : '未知错误'}`);
+      
+      // 使用Alert组件展示更详细的错误信息
+      message.error({
+        content: '生成Prompt失败，查看详细错误信息',
+        duration: 5
+      });
+      
+      // 即使出错，也设置一个默认提示词
+      if (!generatedPrompt) {
+        const defaultPrompt = `# ${techStack}应用开发提示词\n\n## 生成过程发生错误\n\n无法生成提示词，请尝试以下解决方案：\n1. 勾选"跳过缓存"选项重试\n2. 刷新页面后重试\n3. 使用不同的技术栈\n4. 上传不同的设计图\n5. 稍后再试\n\n错误信息: ${errorMessage}`;
+        setGeneratedPrompt(defaultPrompt);
+        setEditedPrompt(defaultPrompt);
+      }
     } finally {
       setFullScreenLoading(false);
     }
@@ -255,7 +399,7 @@ const DesignPromptGenerator: React.FC = () => {
       const requestData = {
         prompt: editedPrompt,
         tech_stack: techStack,
-        design_image_id: uploadResult.id
+        design_image_id: uploadResult.image_id
       };
       
       const response = await fetch(`${API_BASE_URL}/api/design/save`, {
@@ -366,7 +510,7 @@ const DesignPromptGenerator: React.FC = () => {
         {uploadResult && (
           <Alert 
             message="上传成功" 
-            description={`设计图ID: ${uploadResult.id}`} 
+            description={`设计图ID: ${uploadResult.image_id}`} 
             type="success" 
             showIcon 
             style={{ marginTop: '10px' }}
@@ -430,25 +574,64 @@ const DesignPromptGenerator: React.FC = () => {
           </Form.Item>
           
           <Form.Item>
-            <Button 
-              type="primary" 
-              onClick={handleGeneratePrompt}
-              loading={generationStatus.status === 'processing'}
-              disabled={!uploadResult}
-            >
-              生成Prompt
-            </Button>
+            <div style={{ marginBottom: '10px' }}>
+              <Button
+                type="primary"
+                onClick={handleGeneratePrompt}
+                loading={generationStatus.status === 'processing'}
+                disabled={!uploadResult}
+                style={{ marginRight: '10px' }}
+              >
+                生成Prompt
+              </Button>
+              
+              <Checkbox 
+                checked={skipCache} 
+                onChange={(e) => setSkipCache(e.target.checked)}
+                style={{ marginRight: '8px' }}
+              >
+                跳过缓存
+              </Checkbox>
+              
+              <Tooltip title="选中此项将不使用缓存结果，重新生成Prompt。如遇到生成错误，请尝试勾选此选项。">
+                <QuestionCircleOutlined style={{ color: '#1890ff' }} />
+              </Tooltip>
+            </div>
           </Form.Item>
         </Form>
         
         {generationStatus.status === 'error' && (
-          <Alert 
-            message="生成失败" 
-            description={generationStatus.message} 
-            type="error" 
-            showIcon 
-            style={{ marginTop: '10px' }}
+          <Alert
+            message="生成Prompt时发生错误"
+            description={generationStatus.message}
+            type="error"
+            showIcon
+            style={{ marginBottom: '16px' }}
           />
+        )}
+        
+        {/* 显示错误详情 */}
+        {errorDetails && generationStatus.status === 'error' && (
+          <div style={{ marginBottom: '16px' }}>
+            <Collapse>
+              <Panel header="错误详情" key="1">
+                <div style={{ maxHeight: '300px', overflow: 'auto' }}>
+                  <pre>{JSON.stringify(errorDetails, null, 2)}</pre>
+                </div>
+                
+                {errorDetails.env_check && (
+                  <div style={{ marginTop: '10px' }}>
+                    <h4>环境变量检查结果：</h4>
+                    <ul>
+                      {Object.entries(errorDetails.env_check).map(([key, value]) => (
+                        <li key={key}><strong>{key}:</strong> {String(value)}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </Panel>
+            </Collapse>
+          </div>
         )}
       </Card>
       

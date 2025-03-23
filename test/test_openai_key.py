@@ -76,7 +76,7 @@ def test_openai_key() -> Tuple[bool, str]:
         }
         
         # 使用第一个可用的模型
-        model_name = "gpt-3.5-turbo"
+        model_name = "claude-3-7-sonnet-20250219"
         
         data = {
             "model": model_name,

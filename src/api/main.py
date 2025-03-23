@@ -5,12 +5,16 @@ import asyncio
 import uvicorn
 import os
 import sys
+import time
 from typing import List, Optional, Dict, Any
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel, Field
 from datetime import datetime
+import json
+import traceback
 
 # 添加项目根目录到Python路径
 project_root = str(Path(__file__).resolve().parent.parent.parent)
@@ -44,7 +48,7 @@ from src.utils.rag_manager import RAGManager
 from src.file_processor import FileProcessor
 from src.prompt_optimizer import PromptOptimizer
 from src.utils.design_image_processor import DesignImageProcessor
-from src.agents.design_prompt_agent import DesignPromptAgent
+from src.agents.design_prompt_agent import DesignPromptAgent, ensure_directories
 
 # 配置日志
 logging.basicConfig(**settings.get_logging_config())
@@ -78,10 +82,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.API_CONFIG["cors_origins"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,  # 预检请求的缓存时间
+    allow_methods=settings.API_CONFIG["cors_methods"],
+    allow_headers=settings.API_CONFIG["cors_headers"],
 )
 
 # 初始化组件
@@ -119,6 +121,7 @@ class GenerateDesignPromptRequest(BaseModel):
     agent_type: str = Field(settings.DESIGN_PROMPT_CONFIG["default_agent_type"], description="Agent类型")
     temperature: float = Field(settings.DESIGN_PROMPT_CONFIG["temperature"], description="温度")
     context_window_size: int = Field(settings.DESIGN_PROMPT_CONFIG["default_context_window_size"], description="上下文窗口大小")
+    skip_cache: bool = Field(False, description="是否跳过缓存（强制重新生成）")
 
 class SaveUserModifiedPromptRequest(BaseModel):
     """保存用户修改后的Prompt请求"""
@@ -144,6 +147,49 @@ class ConfirmTemplateRequest(BaseModel):
 class ConfirmPromptRequest(BaseModel):
     """确认优化后的prompt请求模型"""
     optimized_prompt: str
+
+def check_env_config():
+    """检查环境配置状态
+    
+    Returns:
+        Dict: 包含环境变量检查结果的字典
+    """
+    # 检查关键环境变量
+    env_check = {
+        "OPENAI_API_KEY": "已设置" if settings.OPENAI_API_KEY else "未设置",
+        "DESIGN_PROMPT_MODEL": settings.DESIGN_PROMPT_MODEL or "未设置",
+        "OPENAI_BASE_URL": settings.OPENAI_BASE_URL or "未设置"
+    }
+    
+    # 检查配置文件
+    config_check = {
+        "设计提示词模型配置": (
+            settings.DESIGN_PROMPT_CONFIG.get("model") is not None or 
+            settings.DESIGN_PROMPT_MODEL is not None
+        )
+    }
+    
+    # 合并检查结果
+    env_check.update(config_check)
+    
+    # 检查发现的问题
+    problems = []
+    if not settings.OPENAI_API_KEY:
+        problems.append("OPENAI_API_KEY未设置")
+    
+    if not settings.DESIGN_PROMPT_MODEL and not settings.DESIGN_PROMPT_CONFIG.get("model"):
+        problems.append("设计提示词模型未在配置中设置")
+        
+    # 记录检查结果
+    logger.info(f"环境变量和配置检查结果: {env_check}")
+    if problems:
+        logger.warning(f"环境变量和配置检查发现问题: {problems}")
+    
+    return {
+        "status": env_check,
+        "problems": problems,
+        "all_valid": len(problems) == 0
+    }
 
 # API路由
 @app.post("/api/optimize")
@@ -482,18 +528,22 @@ async def upload_design_image(
         
         # 保存并处理设计图
         result = await design_image_processor.process_image(
-            image_content=content,
+            image_data=content,
             filename=file.filename,
             tech_stack=tech_stack
         )
         
+        # 检查处理结果
+        if not result.get("success", False):
+            raise ValueError(result.get("error", "处理设计图失败"))
+        
         return {
             "status": "success",
-            "image_id": result["image_id"],
-            "image_path": result["image_path"],
+            "image_id": result["id"],
+            "image_path": result["file_path"],
             "tech_stack": tech_stack,
-            "width": result.get("width", 0),
-            "height": result.get("height", 0),
+            "width": result.get("image_dimensions", [0, 0])[0] if "image_dimensions" in result else 0,
+            "height": result.get("image_dimensions", [0, 0])[1] if "image_dimensions" in result else 0,
             "processing_time": result.get("processing_time", 0)
         }
         
@@ -509,38 +559,112 @@ async def generate_design_prompt(request: GenerateDesignPromptRequest):
     """生成设计图Prompt
     
     Args:
-        request: 生成设计图Prompt请求
-        
+        request: 请求对象
+    
     Returns:
-        Dict[str, Any]: 生成结果
+        Dict: 响应对象
     """
+    start_time = time.time()
+    
     try:
-        # 生成设计图Prompt
-        result = await design_prompt_agent.generate_prompt(
-            tech_stack=request.tech_stack,
-            design_image_id=request.design_image_id,
-            design_image_path=request.design_image_path,
-            rag_method=request.rag_method,
-            retriever_top_k=request.retriever_top_k,
-            agent_type=request.agent_type,
-            temperature=request.temperature,
-            context_window_size=request.context_window_size
+        logger.info(f"开始生成设计图Prompt，技术栈: {request.tech_stack}，设计图ID: {request.design_image_id}")
+        
+        # 检查环境配置
+        env_check = check_env_config()
+        
+        # 如果检查发现问题，但仍要尝试生成
+        if not env_check["all_valid"]:
+            logger.warning(f"尝试生成设计图Prompt，但环境配置存在问题: {env_check['problems']}")
+        
+        # 初始化设计图Prompt生成Agent
+        agent = DesignPromptAgent(
+            temperature=request.temperature
         )
         
-        return {
-            "status": "success",
-            "prompt": result["prompt"],
-            "generation_time": result.get("generation_time", 0),
-            "token_usage": result.get("token_usage", {}),
-            "rag_info": result.get("rag_info", {})
-        }
+        # 生成Prompt
+        try:
+            result = await agent.generate_design_prompt(
+                tech_stack=request.tech_stack,
+                design_image_id=request.design_image_id,
+                design_image_path=request.design_image_path,
+                rag_method=request.rag_method,
+                retriever_top_k=request.retriever_top_k,
+                agent_type=request.agent_type,
+                temperature=request.temperature,
+                context_window_size=request.context_window_size,
+                skip_cache=request.skip_cache
+            )
+            generation_time = time.time() - start_time
+            logger.info(f"成功生成设计图Prompt，技术栈: {request.tech_stack}，设计图ID: {request.design_image_id}")
+            
+            return {
+                "status": "success",
+                "generated_prompt": result["generated_prompt"],
+                "tech_stack": request.tech_stack,
+                "design_image_id": request.design_image_id,
+                "generation_time": round(generation_time, 2),
+                "token_usage": result.get("token_usage", {}),
+                "rag_info": result.get("rag_info", {}),
+                "messages": result.get("messages", []),
+                "similar_designs": result.get("similar_designs", []),
+                "history_prompts": result.get("history_prompts", []),
+                "has_history_context": result.get("has_history_context", False),
+                "design_analysis": result.get("design_analysis", ""),
+                "cache_hit": result.get("cache_hit", False),
+                "env_check": env_check["status"]
+            }
+            
+        except Exception as e:
+            error_info = str(e)
+            logger.error(f"生成设计图Prompt失败: {error_info}")
+            
+            # 如果是OpenAI API的内部错误，返回详细信息
+            if "internal error" in error_info.lower() or "timeout" in error_info.lower():
+                # 从异常信息中提取相关OpenAI错误
+                raise HTTPException(
+                    status_code=422,  # 使用422而不是500，以便前端可以区分处理
+                    detail={
+                        "status": "error",
+                        "message": f"OpenAI API调用失败: {error_info}",
+                        "error_type": "OPENAI_INTERNAL_ERROR",
+                        "env_check": env_check["status"],
+                        "model_info": {
+                            "model": settings.DESIGN_PROMPT_MODEL or settings.DESIGN_PROMPT_CONFIG.get("model", "未设置"),
+                            "base_url": settings.OPENAI_BASE_URL,
+                            "has_api_key": bool(settings.OPENAI_API_KEY)
+                        }
+                    }
+                )
+            
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "status": "error",
+                    "message": f"生成设计图Prompt失败: {error_info}",
+                    "env_check": env_check["status"]
+                }
+            )
+            
+    except HTTPException:
+        # 已处理的HTTP异常直接抛出
+        raise
         
-    except ValueError as e:
-        logger.error(f"生成设计图Prompt失败 (ValueError): {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"生成设计图Prompt失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"处理设计图Prompt请求失败: {str(e)}")
+        if settings.DEBUG:
+            logger.exception("详细错误信息:", exc_info=True)
+            
+        # 检查环境变量问题
+        env_check = check_env_config()
+            
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": f"服务器内部错误: {str(e)}",
+                "env_check": env_check["status"]
+            }
+        )
 
 @app.post("/api/design/save")
 async def save_user_modified_prompt(request: SaveUserModifiedPromptRequest):
@@ -635,6 +759,122 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
                 "code": "INTERNAL_ERROR"
             }
         )
+
+# 添加向量存储状态检查API
+@app.get("/api/vector-db-status", response_model=Dict[str, Any])
+async def get_vector_db_status():
+    """获取向量存储状态
+    
+    Returns:
+        Dict[str, Any]: 向量存储状态信息
+    """
+    try:
+        # 检查向量存储是否已初始化和就绪
+        is_initialized = vector_store.is_initialized()
+        is_ready = vector_store.is_ready()
+        
+        # 获取向量存储的基本信息
+        status_info = {
+            "is_initialized": is_initialized,
+            "is_ready": is_ready,
+            "status": "ready" if is_ready else "initializing",
+            "timestamp": datetime.now().isoformat(),
+            "stores": {}
+        }
+        
+        # 如果有初始化错误，添加到状态信息中
+        error = vector_store.get_initialization_error()
+        if error:
+            status_info["error"] = error
+            status_info["status"] = "error"
+        
+        # 如果已初始化，获取更详细的信息
+        if is_initialized and is_ready:
+            try:
+                # 获取存储统计信息
+                store_stats = await vector_store.get_store_stats()
+                status_info["stores"] = store_stats
+                
+                # 获取嵌入模型信息
+                if hasattr(vector_store, "_embeddings") and vector_store._embeddings is not None:
+                    status_info["embedding_model"] = {
+                        "available": True,
+                        "model": settings.EMBEDDING_MODEL
+                    }
+                else:
+                    status_info["embedding_model"] = {
+                        "available": False,
+                        "reason": "嵌入模型未初始化"
+                    }
+                    
+                # 获取视觉模型信息
+                if hasattr(vector_store, "_vision_model") and vector_store._vision_model is not None:
+                    status_info["vision_model"] = {
+                        "available": True,
+                        "model": settings.VISION_MODEL
+                    }
+                else:
+                    status_info["vision_model"] = {
+                        "available": False,
+                        "reason": "视觉模型未初始化"
+                    }
+            except Exception as e:
+                logger.error(f"获取向量存储详细信息失败: {str(e)}")
+                status_info["detail_error"] = str(e)
+        
+        return status_info
+        
+    except Exception as e:
+        logger.error(f"获取向量存储状态失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取向量存储状态失败: {str(e)}"
+        )
+
+# 添加启动事件
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时执行的操作"""
+    # 确保所有必要的目录存在
+    ensure_directories()
+    
+    # 记录配置信息
+    logger.info(f"加载配置信息，服务启动中...")
+    logger.info(f"当前项目根目录: {settings.BASE_DIR}")
+    logger.info(f"调试模式: {settings.DEBUG}")
+    logger.info(f"日志级别: {settings.LOG_LEVEL}")
+    logger.info(f"OpenAI模型: {settings.OPENAI_MODEL}")
+    logger.info(f"嵌入模型: {settings.EMBEDDING_MODEL}")
+    logger.info(f"向量存储路径: {settings.VECTOR_DB_PATH}")
+    
+    # 初始化全局向量存储
+    try:
+        # 确保向量存储已初始化
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                if await vector_store.wait_until_ready(timeout=10):
+                    logger.info("向量存储初始化成功")
+                    break
+                else:
+                    logger.warning(f"向量存储初始化尝试 {attempt + 1}/{max_retries} 失败")
+                    if attempt < max_retries - 1:
+                        logger.info(f"等待 {retry_delay} 秒后重试...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+            except Exception as e:
+                logger.error(f"向量存储初始化尝试 {attempt + 1}/{max_retries} 出错: {str(e)}")
+                if attempt < max_retries - 1:
+                    logger.info(f"等待 {retry_delay} 秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                else:
+                    logger.error("向量存储初始化失败，将使用Mock数据")
+                    # 这里可以添加使用Mock数据的逻辑
+    except Exception as e:
+        logger.error(f"向量存储初始化过程中发生错误: {str(e)}")
 
 if __name__ == "__main__":
     # 确保加载最新的环境变量

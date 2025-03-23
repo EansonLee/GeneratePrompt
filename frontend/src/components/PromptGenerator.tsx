@@ -110,10 +110,21 @@ const PromptGenerator: React.FC = () => {
                 return false;
             }
             
+            // 使用新的status字段
             setVectorDbStatus(data.status);
-            setVectorDbError(null);
             
-            return data.status === 'ready';
+            if (data.status === 'error') {
+                setVectorDbError(data.error || '向量数据库初始化失败');
+                return false;
+            } else if (data.status === 'initializing') {
+                setVectorDbError('向量数据库正在初始化中，请稍后再试');
+                return false;
+            } else if (data.status === 'ready') {
+                setVectorDbError(null);
+                return true;
+            }
+            
+            return data.is_ready === true;
             
         } catch (error) {
             console.error('检查向量数据库状态失败:', error);
