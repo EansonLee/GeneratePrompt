@@ -276,7 +276,7 @@ class VectorStore:
         
         Args:
             content: 要处理的内容
-            content_type: 内容类型 ("text" 或 "image")
+            content_type: 内容类型 ("text", "image" 或 "design_analysis")
             
         Returns:
             List[float]: 内容的嵌入向量
@@ -289,11 +289,11 @@ class VectorStore:
                 logger.info("开始处理图片内容")
                 return await self._get_image_embedding(content)
                 
-            elif content_type == "text":
+            elif content_type == "text" or content_type == "design_analysis":
                 if not isinstance(content, str):
                     raise ValueError("文本内容必须是字符串类型")
                     
-                logger.info("开始处理文本内容")
+                logger.info(f"开始处理{content_type}内容")
                 return await self._get_embedding_with_cache(content)
                 
             else:
@@ -313,7 +313,7 @@ class VectorStore:
         
         Args:
             content: 要添加的内容
-            content_type: 内容类型 ("text" 或 "image")
+            content_type: 内容类型 ("text", "image" 或 "design_analysis")
             metadata: 内容元数据
             
         Returns:
@@ -337,13 +337,13 @@ class VectorStore:
                 self._store_image_content(content, embedding, metadata, doc_id)
                 logger.info(f"图片内容已添加到向量存储: {doc_id}")
             else:
-                # 存储文本内容
+                # 存储文本内容或设计分析内容
                 texts = [content]
                 metadatas = [metadata]
                 ids = [doc_id]
                 
                 await self.add_texts(texts, metadatas, ids)
-                logger.info(f"文本内容已添加到向量存储: {doc_id}")
+                logger.info(f"{content_type}内容已添加到向量存储: {doc_id}")
             
             return doc_id
             

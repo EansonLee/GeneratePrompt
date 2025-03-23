@@ -1,16 +1,12 @@
 import React, { useState } from 'react';
 import { 
-<<<<<<< HEAD
   Button, Card, Input, Upload, message, Select, Slider, Tabs, 
-  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse, Checkbox, Tooltip 
+  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse, Checkbox, Tooltip, Empty 
 } from 'antd';
-import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, QuestionCircleOutlined } from '@ant-design/icons';
-=======
-  Button, Card, Input, Upload, message, Select, Slider, 
-  Space, Alert, Spin, Typography, Modal, Form, Divider, Collapse, Empty 
-} from 'antd';
-import { UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, CopyOutlined, CloseOutlined } from '@ant-design/icons';
->>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
+import { 
+  UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, QuestionCircleOutlined,
+  CopyOutlined, CloseOutlined 
+} from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd/es/upload/interface';
 import { API_BASE_URL } from '../config';
 import ReactMarkdown from 'react-markdown';
@@ -199,19 +195,16 @@ const DesignPromptGenerator: React.FC = () => {
   // 生成Prompt
   const handleGeneratePrompt = async () => {
     try {
-      if (!uploadResult) {
-        message.error('请先上传设计图');
-        return;
-      }
-
+    if (!uploadResult) {
+      message.error('请先上传设计图');
+      return;
+    }
+    
       setGenerationStatus({ status: 'processing' });
       setFullScreenLoading(true);
       setLoadingMessage('正在生成Prompt...');
-<<<<<<< HEAD
       setErrorDetails(null); // 清除之前的错误详情
-=======
-      setGeneratedPrompt('');
->>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
+      setGeneratedPrompt(''); // 清除之前生成的Prompt
       
       const startTime = Date.now();
       
@@ -219,17 +212,12 @@ const DesignPromptGenerator: React.FC = () => {
       const requestData = {
         tech_stack: techStack,
         design_image_id: uploadResult.image_id,
-<<<<<<< HEAD
-        design_image_path: uploadResult.image_path,
-=======
         design_image_path: uploadResult.file_path,
->>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
         rag_method: ragMethod,
         retriever_top_k: retrieverTopK,
         agent_type: agentType,
         temperature: temperature,
         context_window_size: contextWindowSize,
-<<<<<<< HEAD
         skip_cache: skipCache // 添加跳过缓存参数
       };
       
@@ -249,16 +237,16 @@ const DesignPromptGenerator: React.FC = () => {
           }
           
           response = await fetch(`${API_BASE_URL}/api/design/generate`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            },
-            body: JSON.stringify(requestData),
-            mode: 'cors',
-            cache: 'no-cache'
-          });
-          
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(requestData),
+        mode: 'cors',
+        cache: 'no-cache'
+      });
+      
           if (response.ok) {
             // 成功响应，跳出重试循环
             errorOccurred = false;
@@ -355,8 +343,19 @@ const DesignPromptGenerator: React.FC = () => {
       
       // 成功获取结果
       const result = await response.json();
-      setGeneratedPrompt(result.generated_prompt);
-      setEditedPrompt(result.generated_prompt);
+      
+      // 添加日志，输出整个响应对象以便调试
+      console.log('API响应数据:', result);
+      
+      // 从result.prompt中获取生成的提示词（API返回的字段是prompt而不是generated_prompt）
+      const promptContent = result.prompt || result.generated_prompt || '';
+      
+      if (!promptContent) {
+        console.warn('API响应中没有找到prompt或generated_prompt字段:', result);
+      }
+      
+      setGeneratedPrompt(promptContent);
+      setEditedPrompt(promptContent);
       setHasHistoryContext(result.has_history_context);
       setHistoryPrompts(result.history_prompts || []);
       setGenerationStatus({ status: 'completed' });
@@ -366,110 +365,25 @@ const DesignPromptGenerator: React.FC = () => {
       if (cacheHit) {
         message.success('Prompt生成成功 (使用缓存)');
       } else {
-        message.success('Prompt生成成功');
+      message.success('Prompt生成成功');
       }
       
       // 记录环境检查信息
       if (result.env_check) {
         console.log('环境变量检查结果:', result.env_check);
       }
-=======
-        prompt: "设计图Prompt生成请求"
-      };
-
-      // 发送请求
-      const response = await fetch(`${API_BASE_URL}/api/design/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(requestData),
-        mode: 'cors',
-        cache: 'no-cache'
-      });
-      
-      // 计算耗时
-      const endTime = Date.now();
-      const timeUsed = (endTime - startTime) / 1000;
-
-      if (!response.ok) {
-        let errorMessage = `生成失败: ${response.status} ${response.statusText}`;
-        
-        try {
-          const errorData = await response.json();
-          
-          // 检查是否是OpenAI API错误
-          if (response.status === 503 && errorData.detail && errorData.detail.error_type === 'openai_api_error') {
-            errorMessage = errorData.detail.message || 'OpenAI API服务器暂时不可用，请稍后重试';
-            message.error(errorMessage);
-            
-            // 设置重试按钮
-            setGenerationStatus({ 
-              status: 'error', 
-              message: errorMessage,
-              canRetry: true
-            });
-          } else if (errorData.detail) {
-            errorMessage = typeof errorData.detail === 'string' 
-              ? errorData.detail 
-              : JSON.stringify(errorData.detail);
-            
-            setGenerationStatus({ 
-              status: 'error', 
-              message: errorMessage
-            });
-          }
-        } catch (jsonError) {
-          // 如果无法解析JSON，则使用文本响应
-          const errorText = await response.text();
-          errorMessage = `${errorMessage}\n${errorText}`;
-          setGenerationStatus({ 
-            status: 'error', 
-            message: errorMessage
-          });
-        }
-        
-        throw new Error(errorMessage);
-      }
-
-      const data = await response.json();
-      
-      // 检查是否来自缓存
-      const fromCache = data.from_cache || false;
-      
-      // 检查是否是兜底prompt
-      const isFallbackPrompt = data.is_fallback_prompt || false;
-      
-      // 显示成功消息，包含耗时信息
-      if (fromCache) {
-        message.success(`Prompt生成成功 (从缓存获取)，耗时: ${timeUsed.toFixed(2)}秒`);
-      } else if (isFallbackPrompt) {
-        message.warning(`生成Prompt失败，已使用设计图分析结果作为兜底方案，耗时: ${timeUsed.toFixed(2)}秒`);
-      } else {
-        message.success(`Prompt生成成功，耗时: ${timeUsed.toFixed(2)}秒`);
-      }
-      
-      setGeneratedPrompt(data.generated_prompt || '');
-      setEditedPrompt(data.generated_prompt || '');
-      setHasHistoryContext(data.has_history_context || false);
-      setHistoryPrompts(data.history_prompts || []);
-      setDesignAnalysis(data.design_analysis || {});
->>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
       
       // 如果是兜底prompt，设置状态为警告
-      if (isFallbackPrompt) {
+      if (result.is_fallback_prompt) {
         setGenerationStatus({ 
           status: 'completed',
-          message: '由于生成失败，使用了设计图分析结果作为兜底方案。您可以编辑此Prompt或重试。',
-          canRetry: true
+          message: '没有找到足够的相似设计图或历史Prompt，已使用默认提示词生成'
         });
       } else {
         setGenerationStatus({ status: 'completed' });
       }
     } catch (error: any) {
       console.error('生成Prompt失败:', error);
-<<<<<<< HEAD
       let errorMessage = error instanceof Error ? error.message : '未知错误';
       
       // 增加更多的错误信息详情输出到控制台，帮助调试
@@ -491,16 +405,6 @@ const DesignPromptGenerator: React.FC = () => {
         const defaultPrompt = `# ${techStack}应用开发提示词\n\n## 生成过程发生错误\n\n无法生成提示词，请尝试以下解决方案：\n1. 勾选"跳过缓存"选项重试\n2. 刷新页面后重试\n3. 使用不同的技术栈\n4. 上传不同的设计图\n5. 稍后再试\n\n错误信息: ${errorMessage}`;
         setGeneratedPrompt(defaultPrompt);
         setEditedPrompt(defaultPrompt);
-=======
-      
-      // 如果状态已经设置为错误，则不再更新
-      if (generationStatus.status !== 'error') {
-        setGenerationStatus({ 
-          status: 'error', 
-          message: error instanceof Error ? error.message : '生成失败' 
-        });
-        message.error(`生成Prompt失败: ${error instanceof Error ? error.message : '未知错误'}`);
->>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
       }
     } finally {
       setFullScreenLoading(false);
@@ -968,15 +872,15 @@ const DesignPromptGenerator: React.FC = () => {
           
           <Form.Item>
             <div style={{ marginBottom: '10px' }}>
-              <Button
-                type="primary"
-                onClick={handleGeneratePrompt}
-                loading={generationStatus.status === 'processing'}
-                disabled={!uploadResult}
+            <Button 
+              type="primary" 
+              onClick={handleGeneratePrompt}
+              loading={generationStatus.status === 'processing'}
+              disabled={!uploadResult}
                 style={{ marginRight: '10px' }}
-              >
-                生成Prompt
-              </Button>
+            >
+              生成Prompt
+            </Button>
               
               <Checkbox 
                 checked={skipCache} 
@@ -993,43 +897,7 @@ const DesignPromptGenerator: React.FC = () => {
           </Form.Item>
         </Form>
         
-<<<<<<< HEAD
-        {generationStatus.status === 'error' && (
-          <Alert
-            message="生成Prompt时发生错误"
-            description={generationStatus.message}
-            type="error"
-            showIcon
-            style={{ marginBottom: '16px' }}
-          />
-        )}
-        
-        {/* 显示错误详情 */}
-        {errorDetails && generationStatus.status === 'error' && (
-          <div style={{ marginBottom: '16px' }}>
-            <Collapse>
-              <Panel header="错误详情" key="1">
-                <div style={{ maxHeight: '300px', overflow: 'auto' }}>
-                  <pre>{JSON.stringify(errorDetails, null, 2)}</pre>
-                </div>
-                
-                {errorDetails.env_check && (
-                  <div style={{ marginTop: '10px' }}>
-                    <h4>环境变量检查结果：</h4>
-                    <ul>
-                      {Object.entries(errorDetails.env_check).map(([key, value]) => (
-                        <li key={key}><strong>{key}:</strong> {String(value)}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </Panel>
-            </Collapse>
-          </div>
-        )}
-=======
         {renderGenerationStatus()}
->>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
       </Card>
       
       <Card 
@@ -1043,17 +911,17 @@ const DesignPromptGenerator: React.FC = () => {
               <Card 
                 title="生成的Prompt" 
                 style={{ marginTop: 16 }}
-                extra={
-                  <Space>
+        extra={
+            <Space>
                     {!isEditing ? (
-                      <Button 
-                        type="primary" 
-                        icon={<EditOutlined />} 
-                        onClick={handleStartEditing}
+                <Button 
+                  type="primary" 
+                  icon={<EditOutlined />} 
+                  onClick={handleStartEditing}
                         disabled={!generatedPrompt}
-                      >
-                        编辑
-                      </Button>
+                >
+                  编辑
+                </Button>
                     ) : (
                       <>
                         <Button onClick={handleCancelEditing}>取消</Button>
@@ -1065,18 +933,18 @@ const DesignPromptGenerator: React.FC = () => {
                           保存
                         </Button>
                       </>
-                    )}
-                  </Space>
+              )}
+            </Space>
                 }
               >
-                {generatedPrompt ? (
-                  isEditing ? (
-                    <TextArea 
-                      value={editedPrompt} 
-                      onChange={e => setEditedPrompt(e.target.value)} 
-                      autoSize={{ minRows: 10, maxRows: 20 }}
-                    />
-                  ) : (
+        {generatedPrompt ? (
+          isEditing ? (
+            <TextArea 
+              value={editedPrompt} 
+              onChange={e => setEditedPrompt(e.target.value)} 
+              autoSize={{ minRows: 10, maxRows: 20 }}
+            />
+          ) : (
                     <div className="generated-prompt-container">
                       <div className="prompt-actions" style={{ marginBottom: '16px' }}>
                         <Button 
@@ -1116,15 +984,15 @@ const DesignPromptGenerator: React.FC = () => {
                   label: `历史Prompt ${index + 1} (${metadata.tech_stack || '未知技术栈'})`,
                   children: (
                     <>
-                      <div style={{ whiteSpace: 'pre-wrap' }}>
-                        {prompt.text || '无内容'}
-                      </div>
-                      <div style={{ marginTop: '10px', color: '#888' }}>
-                        <Text type="secondary">
-                          创建时间: {metadata.created_at || '未知'}
-                          {metadata.user_modified && ' | 用户修改: 是'}
-                        </Text>
-                      </div>
+                    <div style={{ whiteSpace: 'pre-wrap' }}>
+                      {prompt.text || '无内容'}
+                    </div>
+                    <div style={{ marginTop: '10px', color: '#888' }}>
+                      <Text type="secondary">
+                        创建时间: {metadata.created_at || '未知'}
+                        {metadata.user_modified && ' | 用户修改: 是'}
+                      </Text>
+                    </div>
                     </>
                   )
                 };
@@ -1152,6 +1020,30 @@ const DesignPromptGenerator: React.FC = () => {
       >
         <p>确定要保存修改后的Prompt吗？保存后将用于未来的Prompt生成。</p>
       </Modal>
+      
+      {/* 显示错误详情 */}
+      {errorDetails && generationStatus.status === 'error' && (
+        <div style={{ marginBottom: '16px' }}>
+          <Collapse>
+            <Collapse.Panel header="错误详情" key="1">
+              <div style={{ maxHeight: '300px', overflow: 'auto' }}>
+                <pre>{JSON.stringify(errorDetails, null, 2)}</pre>
+              </div>
+              
+              {errorDetails.env_check && (
+                <div style={{ marginTop: '10px' }}>
+                  <h4>环境变量检查结果：</h4>
+                  <ul>
+                    {Object.entries(errorDetails.env_check).map(([key, value]) => (
+                      <li key={key}><strong>{key}:</strong> {String(value)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </Collapse.Panel>
+          </Collapse>
+        </div>
+      )}
     </div>
   );
 };

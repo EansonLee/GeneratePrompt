@@ -31,9 +31,13 @@ logs/
 
 # 向量数据库
 data/vector_store/
+vector_store/
+*.faiss
+*.pkl
 
 # 上传文件
 uploads/
+uploads/*
 
 # IDE
 .idea/
@@ -63,17 +67,41 @@ langchain_env/
 # 项目特定
 data/
 *.log
-.env
 .env.local
 .env.*.local
 .env.development
 .env.test
 .env.production
 
-# 向量数据库
-vector_store/
+# 缓存文件和目录
+cache/
+cache/*
+data/design_prompt_cache.json
+data/design_analysis_cache.json
+data/prompt_cache.json
+data/vector_store/
+data/vector_store/*
+data/vector_store/embedding_cache.json
+data/vector_store/embedding_cache.json.gz
+data/vector_store/image_embedding_cache.json
+data/vector_store/embedding_test_status.json
+data/config_check.json
+
+# 向量数据库文件
 *.faiss
 *.pkl
+embedding_db
+embedding_db/*
+database.sqlite
+
+# 测试和临时文件
+test_fix.py
+test_claude.py
+test_request.py
+
+# Node.js
+node_modules/
+package-lock.json
 
 # 其他
 *.bak
