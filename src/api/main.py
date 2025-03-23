@@ -121,7 +121,11 @@ class GenerateDesignPromptRequest(BaseModel):
     agent_type: str = Field(settings.DESIGN_PROMPT_CONFIG["default_agent_type"], description="Agent类型")
     temperature: float = Field(settings.DESIGN_PROMPT_CONFIG["temperature"], description="温度")
     context_window_size: int = Field(settings.DESIGN_PROMPT_CONFIG["default_context_window_size"], description="上下文窗口大小")
+<<<<<<< HEAD
     skip_cache: bool = Field(False, description="是否跳过缓存（强制重新生成）")
+=======
+    prompt: Optional[str] = Field(None, description="提示词")
+>>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
 
 class SaveUserModifiedPromptRequest(BaseModel):
     """保存用户修改后的Prompt请求"""
@@ -148,6 +152,7 @@ class ConfirmPromptRequest(BaseModel):
     """确认优化后的prompt请求模型"""
     optimized_prompt: str
 
+<<<<<<< HEAD
 def check_env_config():
     """检查环境配置状态
     
@@ -190,6 +195,17 @@ def check_env_config():
         "problems": problems,
         "all_valid": len(problems) == 0
     }
+=======
+class DesignImageUploadResponse(BaseModel):
+    """设计图上传响应模型"""
+    success: bool
+    message: str
+    image_id: str
+    file_name: str
+    file_path: str
+    file_size: int
+    tech_stack: str
+>>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
 
 # API路由
 @app.post("/api/optimize")
@@ -504,30 +520,27 @@ async def generate_template(request: TemplateRequest) -> Dict[str, Any]:
             }
         )
 
-@app.post("/api/design/upload")
+@app.post("/api/design/upload", response_model=DesignImageUploadResponse)
 async def upload_design_image(
     file: UploadFile = File(...),
-    tech_stack: str = Form(...)
+    tech_stack: str = Form(...),
 ):
     """上传设计图
     
     Args:
-        file: 上传的设计图文件
+        file: 设计图文件
         tech_stack: 技术栈
         
     Returns:
-        Dict[str, Any]: 处理结果
+        DesignImageUploadResponse: 上传结果
     """
     try:
-        # 验证文件类型
-        if not design_image_processor.is_supported_image(file.filename):
-            raise ValueError(f"不支持的图片格式: {file.filename}")
-            
         # 读取文件内容
-        content = await file.read()
+        file_content = await file.read()
         
-        # 保存并处理设计图
+        # 处理设计图
         result = await design_image_processor.process_image(
+<<<<<<< HEAD
             image_data=content,
             filename=file.filename,
             tech_stack=tech_stack
@@ -550,9 +563,29 @@ async def upload_design_image(
     except ValueError as e:
         logger.error(f"上传设计图失败 (ValueError): {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+=======
+            file_content=file_content,
+            file_name=file.filename,
+        )
+        
+        # 构建响应
+        return DesignImageUploadResponse(
+            success=True,
+            message="上传成功",
+            image_id=result["id"],
+            file_name=result["file_name"],
+            file_path=result["file_path"],
+            file_size=result["file_size"],
+            tech_stack=tech_stack,
+        )
+>>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
     except Exception as e:
         logger.error(f"上传设计图失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"上传设计图失败: {str(e)}"
+        )
 
 @app.post("/api/design/generate")
 async def generate_design_prompt(request: GenerateDesignPromptRequest):
@@ -567,6 +600,7 @@ async def generate_design_prompt(request: GenerateDesignPromptRequest):
     start_time = time.time()
     
     try:
+<<<<<<< HEAD
         logger.info(f"开始生成设计图Prompt，技术栈: {request.tech_stack}，设计图ID: {request.design_image_id}")
         
         # 检查环境配置
@@ -665,6 +699,79 @@ async def generate_design_prompt(request: GenerateDesignPromptRequest):
                 "env_check": env_check["status"]
             }
         )
+=======
+        # 生成设计图Prompt
+        result = await design_prompt_agent.generate_design_prompt(
+            tech_stack=request.tech_stack,
+            design_image_id=request.design_image_id,
+            design_image_path=request.design_image_path,
+            rag_method=request.rag_method,
+            retriever_top_k=request.retriever_top_k,
+            agent_type=request.agent_type,
+            temperature=request.temperature,
+            context_window_size=request.context_window_size,
+            prompt=request.prompt
+        )
+        
+        # 检查是否有错误
+        if "error" in result and result["error"]:
+            # 如果是OpenAI API的500错误，返回更友好的错误消息
+            error_msg = result["error"]
+            if "OpenAI API服务器暂时不可用" in error_msg:
+                raise HTTPException(
+                    status_code=503,  # Service Unavailable
+                    detail={
+                        "message": error_msg,
+                        "error_type": "openai_api_error",
+                        "retry_after": 60  # 建议60秒后重试
+                    }
+                )
+            else:
+                raise HTTPException(status_code=500, detail=error_msg)
+        
+        # 检查是否是兜底prompt
+        is_fallback_prompt = False
+        if "messages" in result:
+            for message in result["messages"]:
+                if message.get("role") == "system" and "使用设计图分析结果作为兜底prompt" in message.get("content", ""):
+                    is_fallback_prompt = True
+                    break
+        
+        return {
+            "status": "success",
+            "prompt": result["generated_prompt"],
+            "generated_prompt": result["generated_prompt"],
+            "generation_time": result.get("generation_time", 0),
+            "token_usage": result.get("token_usage", {}),
+            "rag_info": result.get("rag_info", {}),
+            "design_analysis": result.get("design_analysis", {}),
+            "is_fallback_prompt": is_fallback_prompt
+        }
+        
+    except ValueError as e:
+        logger.error(f"生成设计图Prompt失败 (ValueError): {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        # 重新抛出HTTP异常
+        raise
+    except Exception as e:
+        logger.error(f"生成设计图Prompt失败: {str(e)}")
+        
+        # 检查是否是OpenAI API的500错误
+        error_msg = str(e)
+        if "500" in error_msg and "Internal Error" in error_msg:
+            error_msg = "OpenAI API服务器暂时不可用，请稍后重试。"
+            raise HTTPException(
+                status_code=503,  # Service Unavailable
+                detail={
+                    "message": error_msg,
+                    "error_type": "openai_api_error",
+                    "retry_after": 60  # 建议60秒后重试
+                }
+            )
+        
+        raise HTTPException(status_code=500, detail=str(e))
+>>>>>>> 82c1bcc0ead144b5abb7ab2621735f4f0e5a6b88
 
 @app.post("/api/design/save")
 async def save_user_modified_prompt(request: SaveUserModifiedPromptRequest):
@@ -727,7 +834,7 @@ async def confirm_template(request: ConfirmTemplateRequest) -> Dict[str, Any]:
 
 @app.post("/api/confirm-prompt")
 async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
-    """确认优化后的prompt的API
+    """确认优化后的prompt
     
     Args:
         request: 请求体
@@ -737,14 +844,15 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
     """
     try:
         logger.info("确认优化后的prompt...")
+        logger.info(f"请求参数: {request.dict()}")
         
-        # 这里可以添加prompt确认的逻辑，例如保存到数据库或向量存储
-        # 目前只是简单返回成功
+        # 保存到向量数据库
+        await vector_store.add_prompt(request.optimized_prompt)
         
         return {
             "status": "success",
-            "message": "优化后的prompt已确认",
-            "optimized_prompt": request.optimized_prompt
+            "message": "已确认并保存优化后的prompt",
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
@@ -755,7 +863,35 @@ async def confirm_prompt(request: ConfirmPromptRequest) -> Dict[str, Any]:
             status_code=500,
             detail={
                 "status": "error",
-                "message": f"确认优化后的prompt失败: {str(e)}",
+                "message": f"确认失败: {str(e)}",
+                "code": "INTERNAL_ERROR"
+            }
+        )
+
+@app.get("/api/vector-db-status")
+async def get_vector_db_status():
+    """获取向量数据库状态
+    
+    Returns:
+        Dict[str, Any]: 向量数据库状态信息
+    """
+    try:
+        return {
+            "status": "ready" if vector_store.is_initialized() else "initializing",
+            "error": vector_store.get_initialization_error(),
+            "is_ready": vector_store.is_initialized(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"获取向量数据库状态失败: {str(e)}")
+        if settings.DEBUG:
+            logger.debug("详细错误信息:", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": f"获取状态失败: {str(e)}",
                 "code": "INTERNAL_ERROR"
             }
         )

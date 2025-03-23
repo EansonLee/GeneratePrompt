@@ -84,11 +84,6 @@ class Config:
         return os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     
     @property
-    def DESIGN_PROMPT_MODEL(self) -> str:
-        """获取设计提示词生成模型"""
-        return os.getenv("DESIGN_PROMPT_MODEL", self.OPENAI_MODEL)
-    
-    @property
     def MODEL_CONFIG(self) -> Dict[str, Any]:
         """模型配置"""
         return {
