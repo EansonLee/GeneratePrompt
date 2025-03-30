@@ -57,7 +57,7 @@ const PromptGenerator: React.FC = () => {
     });
     
     // 向量数据库状态
-    const [vectorDbStatus, setVectorDbStatus] = useState<'ready' | 'initializing' | 'error'>('initializing');
+    const [vectorDbStatus, setVectorDbStatus] = useState<'ready' | 'initializing' | 'error' | 'partial'>('initializing');
     const [vectorDbError, setVectorDbError] = useState<string | null>(null);
     
     // 确认对话框状态
@@ -115,16 +115,31 @@ const PromptGenerator: React.FC = () => {
             
             if (data.status === 'error') {
                 setVectorDbError(data.error || '向量数据库初始化失败');
+                console.warn('向量数据库状态: error', data.error || '无错误信息');
                 return false;
             } else if (data.status === 'initializing') {
                 setVectorDbError('向量数据库正在初始化中，请稍后再试');
+                console.info('向量数据库状态: initializing');
                 return false;
+            } else if (data.status === 'partial') {
+                // 部分就绪状态，记录消息但允许使用
+                setVectorDbError(data.message || '向量数据库部分初始化，某些功能可能受限');
+                console.info('向量数据库状态: partial', data.message);
+                return true;
             } else if (data.status === 'ready') {
                 setVectorDbError(null);
+                console.info('向量数据库状态: ready');
                 return true;
             }
             
-            return data.is_ready === true;
+            // 兼容旧版API，如果没有status字段则使用is_ready
+            if (data.is_ready === true) {
+                console.info('向量数据库就绪 (兼容模式)');
+                return true;
+            }
+            
+            console.warn('向量数据库状态未知:', data);
+            return false;
             
         } catch (error) {
             console.error('检查向量数据库状态失败:', error);
@@ -171,7 +186,7 @@ const PromptGenerator: React.FC = () => {
     }, []);
 
     const handleGenerateTemplate = async () => {
-        if (vectorDbStatus !== 'ready') {
+        if (vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial') {
             message.warning('请等待向量数据库初始化完成');
             return;
         }
@@ -209,7 +224,7 @@ const PromptGenerator: React.FC = () => {
     };
 
     const handleOptimizePrompt = async () => {
-        if (vectorDbStatus !== 'ready') {
+        if (vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial') {
             message.warning('请等待向量数据库初始化完成');
             return;
         }
@@ -272,7 +287,7 @@ const PromptGenerator: React.FC = () => {
     };
 
     const handleUpload = async (file: UploadFile) => {
-        if (vectorDbStatus !== 'ready') {
+        if (vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial') {
             message.warning('请等待向量数据库初始化完成');
             return;
         }
@@ -433,8 +448,14 @@ const PromptGenerator: React.FC = () => {
             if (data.status === 'success') {
                 setOptimizedPrompt(tempOptimizedPrompt);
                 message.success('优化后的Prompt已确认并保存到向量数据库！');
+            } else if (data.status === 'partial_success') {
+                setOptimizedPrompt(tempOptimizedPrompt);
+                message.warning('Prompt已保存，但使用了备选方法：' + data.message);
+            } else if (data.status === 'warning') {
+                setOptimizedPrompt(tempOptimizedPrompt);
+                message.warning('Prompt已保存，但可能存在问题：' + data.message);
             } else {
-                throw new Error(data.detail?.message || '保存失败');
+                throw new Error(data.message || '保存失败');
             }
         } catch (error) {
             console.error('保存失败:', error);
@@ -461,7 +482,7 @@ const PromptGenerator: React.FC = () => {
                         status={processingStatus.status === 'completed' ? 'success' : 'active'}
                         format={percent => `${percent}%`}
                     />
-                    <div>向量数据库状态: {vectorDbStatus === 'ready' ? '就绪' : vectorDbStatus === 'initializing' ? '初始化中' : '错误'}</div>
+                    <div>向量数据库状态: {vectorDbStatus === 'ready' ? '就绪' : vectorDbStatus === 'initializing' ? '初始化中' : vectorDbStatus === 'partial' ? '部分初始化' : '错误'}</div>
                 </Space>
             </Card>
         );
@@ -484,11 +505,11 @@ const PromptGenerator: React.FC = () => {
             {/* 全屏加载组件 */}
             {renderFullScreenLoading()}
             
-            {vectorDbStatus !== 'ready' && (
+            {vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial' && (
                 <Alert
-                    message={vectorDbStatus === 'initializing' ? '向量数据库初始化中...' : '向量数据库错误'}
+                    message={vectorDbStatus === 'initializing' ? '向量数据库初始化中...' : vectorDbStatus === 'error' ? '向量数据库错误' : '向量数据库部分初始化'}
                     description={vectorDbError || '请等待向量数据库初始化完成'}
-                    type={vectorDbStatus === 'initializing' ? 'info' : 'error'}
+                    type={vectorDbStatus === 'initializing' ? 'info' : vectorDbStatus === 'error' ? 'error' : 'warning'}
                     showIcon
                     style={{ marginBottom: 16 }}
                 />
@@ -530,7 +551,7 @@ const PromptGenerator: React.FC = () => {
                         onClick={handleGenerateTemplate}
                         loading={generatingTemplate}
                         disabled={
-                            vectorDbStatus !== 'ready' || 
+                            vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial' || 
                             processingStatus.status === 'processing' || 
                             isUploading || 
                             fullScreenLoading
@@ -567,7 +588,7 @@ const PromptGenerator: React.FC = () => {
                         onChange={e => setPrompt(e.target.value)}
                         autoSize={{ minRows: 4, maxRows: 6 }}
                         disabled={
-                            vectorDbStatus !== 'ready' || 
+                            vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial' || 
                             processingStatus.status === 'processing' || 
                             isUploading || 
                             fullScreenLoading
@@ -578,7 +599,7 @@ const PromptGenerator: React.FC = () => {
                         onClick={handleOptimizePrompt}
                         loading={optimizingPrompt}
                         disabled={
-                            vectorDbStatus !== 'ready' || 
+                            vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial' || 
                             !prompt || 
                             processingStatus.status === 'processing' || 
                             isUploading || 

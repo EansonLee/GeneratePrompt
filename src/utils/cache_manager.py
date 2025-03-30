@@ -3,6 +3,10 @@ import time
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
+import os
+import json
+from pathlib import Path
+from hashlib import sha256
 
 logger = logging.getLogger(__name__)
 
@@ -124,4 +128,133 @@ class CacheManager:
             "total_hits": sum(self.hit_counts.values()),
             "items_with_hits": len([k for k, v in self.hit_counts.items() if v > 0]),
             "last_cleanup": self.last_cleanup.isoformat()
-        } 
+        }
+
+class FileHashCache:
+    """基于文件哈希的缓存管理器"""
+    
+    def __init__(self, cache_dir: Path):
+        """初始化缓存管理器
+        
+        Args:
+            cache_dir: 缓存目录路径
+        """
+        self.cache_dir = Path(cache_dir)
+        self.cache_file = self.cache_dir / "file_hash_cache.json"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache: Dict[str, Dict[str, Any]] = self._load_cache()
+        
+    def _load_cache(self) -> Dict[str, Dict[str, Any]]:
+        """加载缓存数据
+        
+        Returns:
+            Dict[str, Dict[str, Any]]: 缓存数据
+        """
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"加载缓存文件失败: {str(e)}")
+        return {}
+        
+    def _save_cache(self):
+        """保存缓存数据"""
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存缓存文件失败: {str(e)}")
+            
+    def get_file_hash(self, file_path: Path) -> str:
+        """计算文件的SHA256哈希值
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            str: 文件的哈希值
+        """
+        try:
+            with open(file_path, 'rb') as f:
+                return sha256(f.read()).hexdigest()
+        except Exception as e:
+            logger.error(f"计算文件哈希失败 {file_path}: {str(e)}")
+            return ""
+            
+    def is_file_changed(self, file_path: Path) -> bool:
+        """检查文件是否已更改
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            bool: 如果文件已更改或未缓存则返回True
+        """
+        if not file_path.exists():
+            return True
+            
+        current_hash = self.get_file_hash(file_path)
+        if not current_hash:
+            return True
+            
+        cached_info = self.cache.get(str(file_path))
+        if not cached_info:
+            return True
+            
+        return cached_info['hash'] != current_hash
+        
+    def get_cached_embeddings(self, file_path: Path) -> Optional[Any]:
+        """获取文件的缓存嵌入向量
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            Optional[Any]: 缓存的嵌入向量，如果不存在则返回None
+        """
+        cached_info = self.cache.get(str(file_path))
+        if cached_info and not self.is_file_changed(file_path):
+            return cached_info.get('embeddings')
+        return None
+        
+    def update_cache(self, file_path: Path, embeddings: Any):
+        """更新文件的缓存信息
+        
+        Args:
+            file_path: 文件路径
+            embeddings: 文件的嵌入向量
+        """
+        self.cache[str(file_path)] = {
+            'hash': self.get_file_hash(file_path),
+            'last_processed': str(datetime.now()),
+            'embeddings': embeddings
+        }
+        self._save_cache()
+        
+    def clear_expired_cache(self, max_age_days: int = 7):
+        """清理过期的缓存数据
+        
+        Args:
+            max_age_days: 缓存最大保留天数
+        """
+        now = datetime.now()
+        expired_files = []
+        
+        for file_path, info in self.cache.items():
+            try:
+                last_processed = datetime.fromisoformat(info['last_processed'])
+                age_days = (now - last_processed).days
+                
+                if age_days > max_age_days:
+                    expired_files.append(file_path)
+            except Exception as e:
+                logger.warning(f"处理缓存条目失败 {file_path}: {str(e)}")
+                expired_files.append(file_path)
+                
+        for file_path in expired_files:
+            del self.cache[file_path]
+            
+        if expired_files:
+            self._save_cache()
+            logger.info(f"已清理 {len(expired_files)} 个过期缓存条目") 

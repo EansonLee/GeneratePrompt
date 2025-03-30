@@ -1,373 +1,229 @@
-# Prompt生成优化系统
+# 设计图Prompt生成器
 
-## 项目简介
-这是一个基于FastAPI和LangChain的Prompt生成优化系统，提供模板生成和提示词优化功能。
+一个基于LLM的设计图解析与Prompt生成工具。该工具可以分析设计图并生成高质量的开发提示词，支持多种技术栈。
+
+## 主要功能
+
+- **设计图解析**：自动分析上传的UI设计图，识别UI元素、布局和交互
+- **Prompt生成**：基于设计图和技术栈生成详细的开发提示词
+- **多技术栈支持**：支持Android、iOS和Flutter等多种技术栈
+- **提示词优化**：利用RAG技术提高生成的Prompt质量
+- **历史提示词利用**：自动检索和利用类似设计的历史提示词
+
+## 项目架构
+
+```
+├── src/                # 源代码
+│   ├── api/            # API接口
+│   ├── agents/         # 代理模块
+│   ├── utils/          # 工具类
+│   │   ├── design_image_processor.py  # 设计图处理器
+│   │   ├── local_project_processor.py # 本地项目处理器
+│   │   └── vector_store.py            # 向量存储
+│   ├── file_processor.py              # 文件处理
+│   └── prompt_optimizer.py            # 提示词优化器
+├── frontend/           # 前端代码
+│   └── src/
+│       ├── components/ # React组件
+│       │   └── DesignPromptGenerator.tsx # 设计图Prompt生成器组件
+│       └── api/        # API客户端
+├── config/             # 配置文件
+└── data/               # 数据存储
+```
+
+## 技术栈
+
+### 后端
+
+- **FastAPI**: Web框架
+- **LangChain**: LLM应用开发框架
+- **LangGraph**: 多步骤Agent工作流引擎
+- **OpenAI API**: LLM服务
+- **Chroma**: 向量数据库
+
+### 前端
+
+- **React**: UI框架
+- **Ant Design**: 组件库
+- **TypeScript**: 类型安全的JavaScript
 
 ## 环境要求
 
-- Python 3.9+ ([Python官网](https://www.python.org/downloads/))
-- Node.js 16+ ([Node.js官网](https://nodejs.org/))
-- pip (Python包管理器)
-- npm (Node.js包管理器)
-- Git (可选，[Git官网](https://git-scm.com/downloads))
+- Python 3.9+
+- Node.js 16+
+- Git
 
-## 快速开始
+## 安装与运行指南
 
-### Windows用户
-
-1. 配置OpenAI API密钥：
-   在项目根目录创建 `.env` 文件，添加：
-   ```
-   OPENAI_API_KEY=你的OpenAI API密钥
-   ```
-
-2. 启动方式：
-
-   方式一：使用批处理文件（推荐）
-   ```bash
-   # 直接双击 start.bat 文件
-   # 或在命令提示符中运行：
-   start.bat
-   # 或在PowerShell中运行：
-   .\start.bat
-   ```
-
-   方式二：手动运行
-   ```bash
-   # 1. 打开命令提示符(cmd)或PowerShell
-   # 2. 进入项目目录
-   cd 项目目录路径
-
-   # 3. 创建并激活虚拟环境
-   python -m venv venv
-   .\venv\Scripts\activate
-
-   # 4. 安装Python依赖
-   pip install -r requirements.txt
-
-   # 5. 安装前端依赖
-   cd frontend
-   npm install
-   cd ..
-
-   # 6. 运行启动脚本
-   python scripts/start.py
-   ```
-
-### Linux/Mac用户
-
-1. 添加执行权限并运行：
-   ```bash
-   # 方法1：使用bash直接执行
-   bash start.sh
-   
-   # 方法2：添加执行权限后运行
-   chmod +x start.sh
-   ./start.sh
-   ```
-
-2. 如果遇到行尾符问题（从Windows复制到Linux时）：
-   ```bash
-   # 安装dos2unix
-   sudo apt-get install dos2unix  # Ubuntu/Debian
-   sudo yum install dos2unix      # CentOS/RHEL
-   
-   # 修复行尾符
-   dos2unix start.sh
-   ```
-
-## 启动脚本说明
-
-### 脚本功能
-
-1. 环境检查：
-   - 检查Python和Node.js是否安装
-   - 验证必要的命令是否可用
-
-2. 虚拟环境管理：
-   - 自动创建Python虚拟环境（如果不存在）
-   - 自动激活虚拟环境
-   - Windows下在 `venv\Scripts\`
-   - Linux下在 `venv/bin/`
-
-3. 依赖安装：
-   - 自动安装Python依赖（requirements.txt）
-   - 自动安装前端依赖（package.json）
-
-4. 服务启动：
-   - 启动后端服务（FastAPI）
-   - 启动前端服务（React）
-
-### 日志和调试
-
-1. 查看运行日志：
-   ```bash
-   # Windows
-   start.bat > log.txt 2>&1
-   
-   # Linux/Mac
-   ./start.sh > log.txt 2>&1
-   ```
-
-2. 调试模式运行：
-   ```bash
-   # Windows PowerShell
-   $env:DEBUG=1; .\start.bat
-   
-   # Linux/Mac
-   DEBUG=1 ./start.sh
-   ```
-
-### 常见问题解决
-
-1. Python相关：
-   ```bash
-   # Linux安装Python虚拟环境包
-   sudo apt-get install python3-venv  # Ubuntu/Debian
-   sudo yum install python3-venv      # CentOS/RHEL
-   
-   # 检查Python位置
-   which python3  # Linux/Mac
-   where python   # Windows
-   ```
-
-2. Node.js相关：
-   ```bash
-   # 检查Node.js和npm版本
-   node --version
-   npm --version
-   
-   # 清除npm缓存
-   npm cache clean --force
-   ```
-
-3. 权限问题：
-   ```bash
-   # Windows PowerShell
-   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-   
-   # Linux/Mac
-   sudo chmod +x start.sh
-   ```
-
-4. 端口占用：
-   ```bash
-   # Windows
-   netstat -ano | findstr :8000  # 检查后端端口
-   netstat -ano | findstr :3000  # 检查前端端口
-   taskkill /F /PID 进程ID
-   
-   # Linux/Mac
-   lsof -i :8000  # 检查后端端口
-   lsof -i :3000  # 检查前端端口
-   kill $(lsof -t -i:8000)  # 结束后端进程
-   ```
-
-## 配置说明
-
-### 配置文件
-- 默认配置已内置在系统中
-- 创建 `.env` 文件可覆盖默认配置
-- 必须配置 `OPENAI_API_KEY`
-
-### 配置检查
-系统包含两个主要脚本：
-
-1. `check_config.py`: 配置检查脚本
-   - 检查环境变量设置
-   - 验证必要目录
-   - 测试OpenAI API连接
-
-2. `start.py`: 启动脚本
-   - 设置环境变量
-   - 调用配置检查
-   - 启动后端和前端服务
-
-### 执行时机
+### 克隆项目
 
 ```bash
-# 场景1：首次运行或日常使用
-start.bat  # Windows
-./start.sh  # Linux/Mac
-
-# 场景2：配置排查
-python scripts/check_config.py  # 仅检查配置
-
-# 场景3：开发调试
-python scripts/start.py  # 直接启动服务
+git clone <repository-url>
+cd design-prompt-generator
 ```
 
-## 项目结构
+### 环境配置
 
-```
-项目根目录
-├── frontend/          # 前端代码
-├── src/              # 后端源码
-│   ├── agents/       # 代理实现
-│   ├── api/          # API实现
-│   └── utils/        # 工具函数
-├── scripts/          # 脚本目录
-│   ├── check_config.py  # 配置检查脚本
-│   └── start.py        # 启动脚本
-├── data/             # 数据目录（自动创建）
-├── logs/             # 日志目录（自动创建）
-├── uploads/          # 上传文件目录（自动创建）
-├── start.bat         # Windows启动脚本
-├── start.sh          # Linux/Mac启动脚本
-├── requirements.txt   # Python依赖
-└── .env              # 环境配置文件（需要创建）
-```
+1. **创建并配置.env文件**
 
-## 开发指南
+   在项目根目录创建`.env`文件，参考以下内容：
 
-### 1. 开发环境准备
+   ```
+   # OpenAI配置
+   OPENAI_API_KEY=your_openai_api_key
+   OPENAI_BASE_URL=https://api.openai.com/v1  # 可选，如果使用代理
 
-1. IDE推荐：
-   - VS Code
-   - PyCharm
-   - WebStorm（前端开发）
+   # 模型配置
+   OPENAI_MODEL=gpt-4
+   EMBEDDING_MODEL=text-embedding-3-small
 
-2. VS Code插件推荐：
-   - Python
-   - Pylance
-   - ESLint
-   - Prettier
-   - GitLens
+   # 视觉模型配置
+   VISION_MODEL=gpt-4-vision-preview
+   VISION_MODEL_TEMPERATURE=0.3
+   VISION_MODEL_MAX_TOKENS=3000
 
-3. 代码风格：
-   - Python: PEP 8
-   - JavaScript: ESLint + Prettier
-   - 使用4空格缩进
+   # 设计提示词生成配置
+   DESIGN_PROMPT_MODEL=gpt-4
+   DESIGN_PROMPT_TEMPERATURE=0.7
+   DESIGN_PROMPT_MAX_TOKENS=3500
+   OPENAI_TIMEOUT=60.0
 
-### 2. 配置管理
-
-1. 环境变量：
-   ```bash
-   # .env 文件示例
-   OPENAI_API_KEY=你的API密钥
-   OPENAI_BASE_URL=https://api.openai.com/v1  # 可选
-   DEBUG=True  # 开发模式
-   LOG_LEVEL=DEBUG  # 日志级别
+   # 应用配置
+   DEBUG=true
+   LOG_LEVEL=DEBUG
    ```
 
-2. 配置优先级：
-   - 环境变量 > .env文件 > 默认配置
-   - 修改配置后运行检查：
-     ```bash
-     python scripts/check_config.py
-     ```
+2. **创建必要的目录**
 
-### 3. 开发工作流
-
-1. 代码更新：
    ```bash
-   # 拉取最新代码
-   git pull
+   mkdir -p data/vector_store uploads logs
+   ```
+
+### 运行方式1：使用启动脚本（推荐）
+
+项目提供了便捷的启动脚本，可以自动完成虚拟环境创建、依赖安装和服务启动。
+
+**Windows系统**：
+```
+start.bat
+```
+
+**macOS/Linux系统**：
+```
+chmod +x start.sh
+./start.sh
+```
+
+启动脚本会自动：
+1. 检查Python和Node.js环境
+2. 创建并激活Python虚拟环境
+3. 安装后端和前端依赖
+4. 启动后端和前端服务
+
+### 运行方式2：手动步骤
+
+如果启动脚本无法正常工作，您可以按照以下步骤手动启动：
+
+1. **设置Python虚拟环境**
+
+   ```bash
+   # 创建虚拟环境
+   python -m venv venv
    
-   # 安装新依赖
+   # 激活虚拟环境（Windows）
+   venv\Scripts\activate
+   
+   # 激活虚拟环境（macOS/Linux）
+   source venv/bin/activate
+   ```
+
+2. **安装后端依赖**
+
+   ```bash
    pip install -r requirements.txt
-   cd frontend && npm install && cd ..
    ```
 
-2. 分步调试：
+3. **启动后端服务**
+
    ```bash
-   # 后端调试（支持热重载）
    python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
-   
-   # 前端调试（支持热重载）
+   ```
+
+4. **安装前端依赖（新开一个终端）**
+
+   ```bash
    cd frontend
+   npm install
+   ```
+
+5. **启动前端服务**
+
+   ```bash
    npm start
    ```
 
-3. 日志查看：
-   - 运行时日志：`logs/app.log`
-   - 错误日志：`logs/error.log`
-   - API访问日志：`logs/access.log`
+### 运行方式3：使用Python启动脚本
 
-### 4. API文档
+项目提供了Python启动脚本，可以在一个命令中完成配置检查和服务启动：
 
-1. 在线文档（服务启动后）：
-   - Swagger UI: http://localhost:8000/docs
-   - ReDoc: http://localhost:8000/redoc
+```bash
+python scripts/start.py
+```
 
-2. API测试：
-   - 使用Swagger UI进行在线测试
-   - 使用Postman进行本地测试
-   - curl命令示例在文档中提供
+## 服务访问
 
-### 5. 故障排除
+启动成功后，可通过以下地址访问：
 
-1. 服务无法启动：
-   - 检查端口占用
-   - 验证环境变量
-   - 查看错误日志
+- **前端界面**：http://localhost:3000
+- **API文档**：http://localhost:8000/docs
+- **API接口**：http://localhost:8000/api/...
 
-2. API调用失败：
-   - 确认服务状态
-   - 检查API密钥
-   - 验证请求格式
+## 使用流程
 
-3. 前端页面问题：
-   - 清除浏览器缓存
-   - 检查Console错误
-   - 验证API连接
+1. 通过前端界面上传设计图
+2. 选择技术栈（Android/iOS/Flutter/React/Vue）
+3. 设置生成参数（可选）
+4. 点击"生成Prompt"
+5. 查看生成的Prompt，可以直接使用或编辑后保存
+6. 复制生成的Prompt用于后续开发
 
-## 注意事项
+## 常见问题排查
 
-1. 安全性：
-   - 不要提交 `.env` 文件
-   - 定期更新依赖
-   - 注意API密钥保护
+1. **端口占用问题**
+   
+   如果8000或3000端口被占用，您可以修改端口：
+   - 后端：修改启动命令中的`--port`参数
+   - 前端：修改`frontend/package.json`中的`start`脚本，添加`PORT=3001`环境变量
 
-2. 性能优化：
-   - 避免大量并发请求
-   - 合理设置超时时间
-   - 注意内存使用
+2. **API密钥问题**
+   
+   确保在`.env`文件中设置了有效的`OPENAI_API_KEY`，否则大部分功能将无法使用。
 
-3. 开发建议：
-   - 遵循代码规范
-   - 编写单元测试
-   - 及时提交代码
+3. **依赖安装问题**
+   
+   如果某些依赖安装失败，可以尝试：
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt --no-cache-dir
+   ```
 
-4. 环境维护：
-   - 定期更新依赖
-   - 备份重要数据
-   - 监控服务状态
+## 高级功能
 
-## 贡献指南
+### 本地项目分析
 
-1. 提交PR流程：
-   - Fork项目
-   - 创建特性分支
-   - 提交变更
-   - 发起Pull Request
+本地项目分析功能可以分析本地项目代码，提取代码的上下文信息，用于生成更精准的提示词：
 
-2. 代码要求：
-   - 遵循项目代码风格
-   - 添加必要的注释
-   - 更新相关文档
+1. **智能抽样**: 
+   - 分析目录结构，确定关键文件
+   - 检测技术栈相关文件（如package.json, pubspec.yaml等）
+   - 识别UI组件和模型文件
+2. **并行处理**: 并行处理文件内容
+3. **增量分析**: 使用文件哈希缓存分析结果
 
-3. 文档维护：
-   - 更新README
-   - 添加注释
-   - 编写使用示例
+## 贡献
 
-## 支持和帮助
-
-- 提交Issue报告问题
-- 查看Wiki获取详细指南
-- 通过Discussions讨论功能特性
+欢迎贡献代码！请确保代码符合项目的代码风格和测试标准。
 
 ## 许可证
 
-MIT License - 详见 LICENSE 文件
-
-## 开发调试
-
-### 后端调试
-如需单独启动后端服务进行调试，可以使用以下命令：
-
-```bash
-# 在项目根目录下执行
-python -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
-``` 
+MIT License 

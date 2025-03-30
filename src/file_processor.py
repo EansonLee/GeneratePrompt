@@ -15,8 +15,19 @@ from langchain_community.document_loaders import (
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from datetime import datetime
 import uuid
+from config.config import settings
+from src.utils.cache_manager import FileHashCache
+from src.utils.performance_monitor import performance_monitor
+import asyncio
+import time
+import concurrent.futures
+from functools import partial
 
 logger = logging.getLogger(__name__)
+
+# 并行处理配置
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 
 def find_7zip_path() -> str:
     """查找7-Zip可执行文件的路径，支持Windows和Linux系统"""
@@ -53,30 +64,26 @@ def find_7zip_path() -> str:
 class FileProcessor:
     """文件处理器类"""
     
-    SUPPORTED_EXTENSIONS = {
-        # 文本文件
-        '.txt': 'text',
-        '.md': 'markdown',
-        '.markdown': 'markdown',
-        # 代码文件
-        '.py': 'python',
+    # 忽略的目录
+    IGNORED_DIRECTORIES = {
+        'build', 'dist', '.git', '__pycache__', 
+        'node_modules', 'venv', '.pytest_cache',
+        'htmlcov', 'prompt_generator.egg-info',
+        'coverage', 'target', '.idea', '.vscode'
+    }
+    
+    # 核心文件类型
+    CORE_FILE_EXTENSIONS = {
+        '.kt': 'kotlin',
+        '.swift': 'swift',
         '.js': 'javascript',
-        '.jsx': 'react',
         '.ts': 'typescript',
-        '.tsx': 'react',
-        # 配置文件
-        '.json': 'json',
-        '.yaml': 'yaml',
-        '.yml': 'yaml',
-        '.env': 'env',
-        # 样式文件
-        '.css': 'css',
-        '.scss': 'scss',
-        '.less': 'less',
-        # 压缩文件
-        '.zip': 'archive',
-        '.rar': 'archive',
-        '.7z': 'archive'
+        '.py': 'python',
+        '.java': 'java',
+        '.cpp': 'cpp',
+        '.h': 'cpp_header',
+        '.jsx': 'react',
+        '.tsx': 'react-typescript'
     }
 
     SPECIAL_FILES = {
@@ -105,6 +112,17 @@ class FileProcessor:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         
+        # 初始化缓存管理器
+        self.cache = FileHashCache(self.temp_dir)
+        
+        # 初始化文本分割器
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=settings.VECTOR_STORE_CONFIG["chunk_size"],
+            chunk_overlap=settings.VECTOR_STORE_CONFIG["chunk_overlap"],
+            length_function=len,
+            separators=["\n\n", "\n", "。", "，", " ", ""]
+        )
+        
         # 查找7-Zip路径
         try:
             self.seven_zip_path = find_7zip_path()
@@ -115,17 +133,26 @@ class FileProcessor:
             
         logger.info(f"文件处理器初始化完成，上传目录: {self.upload_dir}")
 
-    def is_supported_file(self, filename: str) -> bool:
-        """检查文件是否支持
+    def should_process_file(self, file_path: Path) -> bool:
+        """判断是否应该处理该文件
         
         Args:
-            filename: 文件名
+            file_path: 文件路径
             
         Returns:
-            bool: 是否支持该文件类型
+            bool: 是否应该处理
         """
-        ext = Path(filename).suffix.lower()
-        return ext in self.SUPPORTED_EXTENSIONS
+        # 检查是否在忽略目录中
+        if any(ignored in file_path.parts for ignored in self.IGNORED_DIRECTORIES):
+            performance_monitor.record_skipped_file(str(file_path), "ignored_directory")
+            return False
+            
+        # 检查是否是核心文件类型
+        if file_path.suffix.lower() not in self.CORE_FILE_EXTENSIONS:
+            performance_monitor.record_skipped_file(str(file_path), "not_core_file_type")
+            return False
+            
+        return True
 
     def get_file_type(self, filename: str) -> str:
         """获取文件类型
@@ -138,8 +165,8 @@ class FileProcessor:
         """
         ext = Path(filename).suffix.lower()
         # 直接使用扩展名判断，不再依赖外部工具
-        if ext in self.SUPPORTED_EXTENSIONS:
-            return self.SUPPORTED_EXTENSIONS[ext]
+        if ext in self.CORE_FILE_EXTENSIONS:
+            return self.CORE_FILE_EXTENSIONS[ext]
         return 'unknown'
 
     async def _get_file_content(self, file_path: Path) -> str:
@@ -153,7 +180,7 @@ class FileProcessor:
         """
         try:
             # 检查文件类型
-            if not self.is_supported_file(file_path.name):
+            if not self.should_process_file(file_path):
                 raise ValueError(f"不支持的文件类型: {file_path.suffix}")
                 
             # 获取文件类型
@@ -194,58 +221,81 @@ class FileProcessor:
             logger.error(f"读取文件内容失败 {file_path}: {str(e)}")
             raise ValueError(f"读取文件内容失败: {str(e)}")
 
-    async def process_file(self, file_path: Path, is_directory: bool = False) -> Dict[str, Any]:
-        """处理上传的文件
+    async def process_file(self, file_path: Path) -> Dict[str, Any]:
+        """处理单个文件
         
         Args:
             file_path: 文件路径
-            is_directory: 是否作为目录处理
             
         Returns:
             Dict[str, Any]: 处理结果
         """
-        try:
-            logger.info(f"开始处理文件: {file_path}")
-            
-            # 检查文件类型
-            file_type = self.get_file_type(file_path.name)
-            
-            # 如果是压缩文件，直接使用 process_archive
-            if file_type == 'archive':
-                logger.info("检测到压缩文件，使用压缩文件处理器...")
-                return await self.process_archive(file_path)
-            
-            # 获取文件内容
-            content = await self._get_file_content(file_path)
-            if not content:
-                raise ValueError(f"无法读取文件内容: {file_path}")
+        file_size = file_path.stat().st_size if file_path.exists() else 0
+        
+        with performance_monitor.measure_time(
+            "file_processing", 
+            file_path=str(file_path),
+            file_size=file_size,
+            is_cached=False
+        ):
+            try:
+                # 检查缓存
+                cached_embeddings = self.cache.get_cached_embeddings(file_path)
+                if cached_embeddings is not None:
+                    logger.info(f"使用缓存的嵌入向量 {file_path}")
+                    performance_monitor.metrics["cache_hits"] += 1
+                    return {
+                        'status': 'success',
+                        'embeddings': cached_embeddings,
+                        'from_cache': True
+                    }
                 
-            # 准备元数据
-            metadata = {
-                "file_name": file_path.name,
-                "file_type": file_path.suffix.lstrip('.'),
-                "file_path": str(file_path),
-                "timestamp": datetime.now().isoformat()
-            }
-            logger.info(f"完整元数据: {metadata}")
-            
-            # 添加到向量数据库
-            logger.info("添加到向量数据库...")
-            await self.vector_store.add_texts(
-                texts=[content],
-                metadatas=[metadata]
-            )
-            
-            return {
-                "status": "success",
-                "file_name": file_path.name,
-                "file_type": metadata["file_type"],
-                "total_chunks": 1
-            }
-            
-        except Exception as e:
-            logger.error(f"处理文件失败 {file_path}: {str(e)}")
-            raise ValueError(f"处理文件失败: {str(e)}")
+                performance_monitor.metrics["cache_misses"] += 1
+                
+                # 读取文件内容
+                content = await self._get_file_content(file_path)
+                
+                # 分割文本
+                chunks = self.text_splitter.split_text(content)
+                
+                # 估算token数量（简单估算：每个单词约1.3个token）
+                total_tokens = sum(len(chunk.split()) * 1.3 for chunk in chunks)
+                
+                # 记录嵌入生成性能
+                embedding_start_time = time.time()
+                
+                # 获取嵌入向量
+                embeddings = await self.vector_store.add_texts(
+                    texts=chunks,
+                    metadatas=[{'source': str(file_path)} for _ in chunks]
+                )
+                
+                embedding_time = time.time() - embedding_start_time
+                
+                # 记录嵌入生成性能
+                performance_monitor.record_embedding_generation(
+                    text_length=len(content),
+                    token_count=int(total_tokens),
+                    generation_time=embedding_time,
+                    model_name=settings.EMBEDDING_MODEL
+                )
+                
+                # 更新缓存
+                self.cache.update_cache(file_path, embeddings)
+                
+                return {
+                    'status': 'success',
+                    'embeddings': embeddings,
+                    'chunks': chunks,
+                    'from_cache': False
+                }
+                
+            except Exception as e:
+                logger.error(f"处理文件失败 {file_path}: {str(e)}")
+                return {
+                    'status': 'error',
+                    'error': str(e)
+                }
 
     def _extract_key_information(self, content: str, file_name: str = None) -> Dict[str, Any]:
         """从文件内容中提取关键信息
@@ -581,7 +631,7 @@ class FileProcessor:
                 failed_files = 0
                 
                 for file_path in extract_dir.rglob("*"):
-                    if file_path.is_file() and self.is_supported_file(file_path.name):
+                    if file_path.is_file() and self.should_process_file(file_path):
                         try:
                             result = await self.process_file(file_path)
                             if result.get("status") == "success":
@@ -651,4 +701,133 @@ class FileProcessor:
                 
         except Exception as e:
             logger.error(f"保存上传文件失败: {str(e)}", exc_info=True)
-            raise ValueError(f"保存上传文件失败: {str(e)}") 
+            raise ValueError(f"保存上传文件失败: {str(e)}")
+
+    async def process_directory(self, directory: Path) -> Dict[str, Any]:
+        """处理目录中的文件
+        
+        Args:
+            directory: 目录路径
+            
+        Returns:
+            Dict[str, Any]: 处理结果统计
+        """
+        stats = {
+            'processed_files': 0,
+            'skipped_files': 0,
+            'failed_files': 0,
+            'total_chunks': 0,
+            'from_cache': 0,
+            'processing_time': 0
+        }
+        
+        # 清理过期缓存
+        self.cache.clear_expired_cache()
+        
+        start_time = time.time()
+        
+        # 收集所有需要处理的文件
+        files_to_process = []
+        for file_path in directory.rglob('*'):
+            if not file_path.is_file():
+                continue
+                
+            if not self.should_process_file(file_path):
+                stats['skipped_files'] += 1
+                continue
+                
+            files_to_process.append(file_path)
+        
+        # 按批次处理文件
+        total_files = len(files_to_process)
+        logger.info(f"准备处理 {total_files} 个文件，每批 {BATCH_SIZE} 个文件，最大工作线程 {MAX_WORKERS}")
+        
+        for i in range(0, total_files, BATCH_SIZE):
+            batch = files_to_process[i:i + BATCH_SIZE]
+            batch_results = await asyncio.gather(
+                *[self.process_file(file_path) for file_path in batch],
+                return_exceptions=True
+            )
+            
+            for file_path, result in zip(batch, batch_results):
+                if isinstance(result, Exception):
+                    logger.error(f"处理文件失败 {file_path}: {str(result)}")
+                    stats['failed_files'] += 1
+                    continue
+                    
+                if result['status'] == 'success':
+                    stats['processed_files'] += 1
+                    if result.get('from_cache'):
+                        stats['from_cache'] += 1
+                    if 'chunks' in result:
+                        stats['total_chunks'] += len(result['chunks'])
+                else:
+                    stats['failed_files'] += 1
+        
+        stats['processing_time'] = time.time() - start_time
+        
+        # 记录性能指标
+        performance_stats = performance_monitor.get_statistics()
+        stats['performance'] = {
+            'cache_hit_ratio': performance_stats['cache_hit_ratio'],
+            'avg_file_processing_time': performance_stats['avg_file_processing_time'],
+            'avg_embedding_generation_time': performance_stats['avg_embedding_generation_time'],
+            'total_processing_time': stats['processing_time']
+        }
+        
+        # 添加性能对比
+        if stats['processed_files'] > 0:
+            avg_time_per_file = stats['processing_time'] / stats['processed_files']
+            stats['performance']['avg_time_per_file'] = avg_time_per_file
+            
+            # 计算并行效率
+            if performance_stats['avg_file_processing_time'] > 0:
+                parallel_efficiency = performance_stats['avg_file_processing_time'] / (avg_time_per_file * MAX_WORKERS)
+                stats['performance']['parallel_efficiency'] = min(parallel_efficiency, 1.0)
+        
+        # 保存性能指标
+        performance_monitor.save_metrics()
+        
+        return stats
+
+    async def _get_embeddings_batch_parallel(self, texts: List[str]) -> List[List[float]]:
+        """并行获取批量嵌入向量
+        
+        Args:
+            texts: 文本列表
+            
+        Returns:
+            List[List[float]]: 嵌入向量列表
+        """
+        if not texts:
+            return []
+        
+        # 每批处理的文本数量
+        batch_size = min(20, len(texts))
+        
+        # 创建文本批次
+        batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
+        
+        # 使用线程池并行处理每个批次
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            embedding_tasks = []
+            for batch in batches:
+                task = asyncio.create_task(
+                    asyncio.to_thread(self.vector_store.embeddings.embed_documents, batch)
+                )
+                embedding_tasks.append(task)
+            
+            # 等待所有任务完成
+            batch_results = await asyncio.gather(*embedding_tasks, return_exceptions=True)
+        
+        # 合并结果
+        all_embeddings = []
+        for result in batch_results:
+            if isinstance(result, Exception):
+                logger.error(f"获取嵌入向量失败: {str(result)}")
+                # 添加空向量作为占位符
+                all_embeddings.extend([[0.0] * settings.VECTOR_STORE_CONFIG.get("embedding_dimensions", 64)] * batch_size)
+            else:
+                all_embeddings.extend(result)
+        
+        return all_embeddings[:len(texts)] 

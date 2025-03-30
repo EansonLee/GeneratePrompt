@@ -1,1798 +1,564 @@
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import logging
 import os
 from datetime import datetime
-from unittest.mock import Mock, MagicMock
+from pathlib import Path
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
-from config.config import settings
 import numpy as np
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-import requests
-import json
-from pathlib import Path
-import time
+from config.config import settings
 import asyncio
-import uuid
-from .cache_manager import CacheManager
+import faiss
+from tqdm import tqdm
+import time
+from src.utils.performance_monitor import performance_monitor
+import json
 
-# 设置日志级别
 logger = logging.getLogger(__name__)
-logger.setLevel(settings.LOG_LEVEL)
 
 class VectorStore:
-    """增强的向量存储类，支持多模态处理"""
+    """向量存储类，使用FAISS实现高效的向量检索"""
     
-    _instance = None  # 单例实例
-    _is_initialized = False  # 初始化标志
-    _is_ready = False  # 就绪标志
-    _initialization_error = None  # 初始化错误信息
-    _embedding_cache = {}  # 文本嵌入缓存
-    _embedding_cache_file = Path(settings.VECTOR_DB_PATH) / "embedding_cache.json"
-    _image_embedding_cache = {}  # 图片嵌入缓存
-    _image_embedding_cache_file = Path(settings.VECTOR_DB_PATH) / "image_embedding_cache.json"
-    _vision_model = None  # 视觉模型实例
-    
-    def __new__(cls, use_mock: bool = False):
-        """单例模式实现"""
-        if cls._instance is None:
-            cls._instance = super(VectorStore, cls).__new__(cls)
-        return cls._instance
-    
-    def __init__(self, use_mock: bool = False):
+    def __init__(self, storage_dir: Optional[Union[str, Path]] = None):
         """初始化向量存储
         
         Args:
-            use_mock: 是否使用模拟数据
+            storage_dir: 向量存储目录
         """
-        # 如果已经初始化过，直接返回
-        if hasattr(self, '_stores'):
-            return
-            
-        self.use_mock = use_mock
-        self._stores = {}
+        self.storage_dir = Path(storage_dir or settings.DATA_DIR) / "vector_store"
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
         
-        try:
-            # 确保向量存储目录存在
-            Path(settings.VECTOR_DB_PATH).mkdir(parents=True, exist_ok=True)
-            
-            # 初始化文本嵌入
-            self._init_text_embeddings()
-            
-            # 初始化存储（必须在文本嵌入初始化之后）
-            self._init_stores()
-            
-            # 验证存储是否正确初始化
-            if not all([
-                hasattr(self, 'context_store'),
-                hasattr(self, 'template_store'),
-                hasattr(self, 'prompts_store'),
-                hasattr(self, 'designs_store')
-            ]):
-                raise ValueError("存储初始化失败")
-            
-            # 初始化视觉模型
-            self._init_vision_model()
-            
-            # 加载缓存
-            self._load_embedding_cache()
-            self._load_image_embedding_cache()
-            self._load_doc_cache()
-            
-            if use_mock:
-                self._init_mock_data()
-                
-            VectorStore._is_initialized = True
-            VectorStore._is_ready = True
-            logger.info("向量存储初始化完成")
-            
-        except Exception as e:
-            VectorStore._initialization_error = str(e)
-            logger.error(f"向量存储初始化失败: {str(e)}", exc_info=True)
-            raise
-
-    def is_initialized(self) -> bool:
-        """检查向量存储是否已初始化
+        # 初始化嵌入模型
+        self.embeddings = OpenAIEmbeddings(
+            model=settings.EMBEDDING_MODEL,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_BASE_URL,
+            openai_organization=None  # 如果需要组织ID，可以从settings中添加
+        )
         
-        Returns:
-            bool: 是否已初始化
-        """
-        return VectorStore._is_initialized
+        # 初始化向量存储
+        self.stores = self._init_stores()
+        
+        logger.info(f"向量存储初始化完成，使用目录: {self.storage_dir}")
     
-    def is_ready(self) -> bool:
-        """检查向量存储是否就绪可用
+    def _init_stores(self) -> Dict[str, FAISS]:
+        """初始化各类型向量存储
         
         Returns:
-            bool: 是否已就绪可用
+            Dict[str, FAISS]: 向量存储字典
         """
-        return VectorStore._is_ready
-
-    def get_initialization_error(self) -> Optional[str]:
-        """获取初始化错误信息
+        stores = {}
+        store_types = ['contexts', 'templates', 'prompts']
         
-        Returns:
-            Optional[str]: 错误信息，如果没有错误则返回None
-        """
-        try:
-            if not self._initialization_error:
-                return None
+        for store_type in store_types:
+            index_path = self.storage_dir / store_type
             
-            # 添加更多上下文信息
-            error_context = {
-                "error": self._initialization_error,
-                "is_initialized": self._is_initialized,
-                "is_ready": self._is_ready,
-                "has_embeddings": hasattr(self, 'embeddings'),
-                "has_context_store": hasattr(self, 'context_store'),
-                "has_template_store": hasattr(self, 'template_store'),
-                "has_prompts_store": hasattr(self, 'prompts_store'),
-                "has_designs_store": hasattr(self, 'designs_store')
-            }
-            
-            return json.dumps(error_context, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"获取初始化错误信息失败: {str(e)}")
-            return str(self._initialization_error) if self._initialization_error else None
-
-    async def wait_until_ready(self, timeout: int = 30) -> bool:
-        """等待向量数据库就绪
-        
-        Args:
-            timeout: 超时时间（秒）
-            
-        Returns:
-            bool: 是否就绪
-        """
-        try:
-            start_time = time.time()
-            check_interval = 1  # 检查间隔（秒）
-            
-            while not self.is_initialized() and time.time() - start_time < timeout:
-                await asyncio.sleep(check_interval)
-                
-                # 如果有初始化错误，立即返回
-                if self._initialization_error:
-                    logger.error(f"向量存储初始化失败: {self._initialization_error}")
-                    return False
-                
-                # 记录等待时间
-                elapsed = time.time() - start_time
-                if elapsed > timeout / 2:
-                    logger.warning(f"向量存储初始化时间较长: {elapsed:.1f}秒")
-                
-            is_ready = self.is_initialized()
-            if not is_ready:
-                logger.error(f"向量存储初始化超时（{timeout}秒）")
-            
-            return is_ready
-            
-        except Exception as e:
-            logger.error(f"等待向量存储就绪失败: {str(e)}")
-            return False
-
-    def _init_text_embeddings(self):
-        """初始化文本嵌入模型"""
-        try:
-            if self.use_mock:
-                self._embeddings = Mock()
-                logger.info("使用Mock嵌入模型")
-                return
-            
-            # 初始化嵌入模型
-            embedding_model = settings.EMBEDDING_MODEL
-            logger.info(f"正在初始化嵌入模型: {embedding_model}")
-            
-            self._embeddings = OpenAIEmbeddings(
-                model=embedding_model,
-                openai_api_key=settings.OPENAI_API_KEY,
-                openai_api_base=settings.OPENAI_BASE_URL
-            )
-            
-            # 测试嵌入模型
-            test_text = "测试嵌入模型"
             try:
-                test_embedding = self._embeddings.embed_query(test_text)
-                if len(test_embedding) > 0:
-                    logger.info(f"嵌入模型 {embedding_model} 初始化成功，向量维度: {len(test_embedding)}")
+                if index_path.exists():
+                    stores[store_type] = FAISS.load_local(
+                        str(index_path),
+                        self.embeddings,
+                        allow_dangerous_deserialization=True
+                    )
                 else:
-                    raise ValueError("嵌入模型返回空向量")
+                    # 创建新的向量存储
+                    stores[store_type] = self._create_new_store()
+                    # 保存
+                    stores[store_type].save_local(str(index_path))
+                    
             except Exception as e:
-                logger.error(f"嵌入模型测试失败: {str(e)}")
-                raise
-            
-        except Exception as e:
-            logger.error(f"初始化嵌入模型失败: {str(e)}", exc_info=True)
-            raise
-    
-    def _init_vision_model(self):
-        """初始化视觉模型"""
-        try:
-            from openai import OpenAI
-            import time
-            
-            if self.use_mock:
-                self._vision_model = Mock()
-                logger.info("使用Mock视觉模型")
-                return
+                logger.error(f"初始化向量存储 {store_type} 失败: {str(e)}")
+                # 创建新的作为后备
+                stores[store_type] = self._create_new_store()
                 
-            # 初始化视觉模型
-            self._vision_model = OpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_BASE_URL
-            )
-            
-            # 获取配置的视觉模型
-            vision_model = settings.VISION_MODEL
-            vision_temp = settings.VISION_MODEL_CONFIG["temperature"]
-            vision_max_tokens = settings.VISION_MODEL_CONFIG["max_tokens"]
-            logger.info(f"正在初始化视觉模型: {vision_model}, 温度: {vision_temp}, 最大tokens: {vision_max_tokens}")
-            
-            # 测试模型连接
-            max_retries = 3
-            retry_delay = 1
-            
-            for attempt in range(max_retries):
-                try:
-                    test_response = self._vision_model.models.list()
-                    if not test_response:
-                        raise ValueError("无法连接到OpenAI API")
-                    
-                    # 验证是否支持配置的视觉模型
-                    available_models = [model.id for model in test_response]
-                    
-                    if vision_model not in available_models:
-                        logger.warning(f"配置的视觉模型 {vision_model} 不可用，请确保API支持该模型")
-                        logger.info(f"可用模型: {', '.join(available_models)}")
-                        
-                        # 尝试查找替代模型
-                        alternative_models = [
-                            m for m in available_models 
-                            if "vision" in m.lower() or "gpt-4" in m.lower() or "claude" in m.lower()
-                        ]
-                        
-                        if alternative_models:
-                            logger.warning(f"将使用替代视觉模型: {alternative_models[0]}")
-                    else:
-                        logger.info(f"视觉模型 {vision_model} 可用")
-                    
-                    logger.info(f"视觉模型初始化成功，将使用模型: {vision_model}")
-                    break
-                    
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"视觉模型连接尝试 {attempt + 1} 失败: {str(e)}")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # 指数退避
-                    else:
-                        raise
-                        
-        except Exception as e:
-            logger.error(f"初始化视觉模型失败: {str(e)}", exc_info=True)
-            raise
-    
-    async def process_content(self, content: Any, content_type: str = "text") -> List[float]:
-        """处理内容并返回嵌入向量
+        return stores
         
-        Args:
-            content: 要处理的内容
-            content_type: 内容类型 ("text", "image" 或 "design_analysis")
-            
+    def _create_new_store(self) -> FAISS:
+        """创建新的向量存储
+        
         Returns:
-            List[float]: 内容的嵌入向量
+            FAISS: 新的向量存储实例
         """
-        try:
-            if content_type == "image":
-                if not isinstance(content, bytes):
-                    raise ValueError("图片内容必须是bytes类型")
-                    
-                logger.info("开始处理图片内容")
-                return await self._get_image_embedding(content)
-                
-            elif content_type == "text" or content_type == "design_analysis":
-                if not isinstance(content, str):
-                    raise ValueError("文本内容必须是字符串类型")
-                    
-                logger.info(f"开始处理{content_type}内容")
-                return await self._get_embedding_with_cache(content)
-                
-            else:
-                raise ValueError(f"不支持的内容类型: {content_type}")
-                
-        except Exception as e:
-            logger.error(f"处理内容失败: {str(e)}", exc_info=True)
-            raise
-
-    async def add_content(
-        self,
-        content: Any,
-        content_type: str = "text",
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """添加内容到向量存储
-        
-        Args:
-            content: 要添加的内容
-            content_type: 内容类型 ("text", "image" 或 "design_analysis")
-            metadata: 内容元数据
-            
-        Returns:
-            str: 文档ID
-        """
-        try:
-            # 生成文档ID
-            doc_id = str(uuid.uuid4())
-            
-            # 处理元数据
-            if metadata is None:
-                metadata = {}
-            metadata["content_type"] = content_type
-            metadata["timestamp"] = datetime.now().isoformat()
-            
-            # 获取内容的嵌入向量
-            embedding = await self.process_content(content, content_type)
-            
-            if content_type == "image":
-                # 存储图片内容
-                self._store_image_content(content, embedding, metadata, doc_id)
-                logger.info(f"图片内容已添加到向量存储: {doc_id}")
-            else:
-                # 存储文本内容或设计分析内容
-                texts = [content]
-                metadatas = [metadata]
-                ids = [doc_id]
-                
-                await self.add_texts(texts, metadatas, ids)
-                logger.info(f"{content_type}内容已添加到向量存储: {doc_id}")
-            
-            return doc_id
-            
-        except Exception as e:
-            logger.error(f"添加内容失败: {str(e)}", exc_info=True)
-            raise
-
-    def _store_image_content(
-        self,
-        image_data: bytes,
-        embedding: List[float],
-        metadata: Dict[str, Any],
-        doc_id: str
-    ):
-        """存储图片内容
-        
-        Args:
-            image_data: 图片数据
-            embedding: 图片的嵌入向量
-            metadata: 图片元数据
-            doc_id: 文档ID
-        """
-        try:
-            # 计算图片hash
-            import hashlib
-            image_hash = hashlib.md5(image_data).hexdigest()
-            
-            # 更新元数据
-            metadata.update({
-                "image_hash": image_hash,
-                "vector_dim": len(embedding),
-                "doc_id": doc_id
-            })
-            
-            # 存储到向量数据库
-            self.image_store.add_embeddings(
-                [embedding],
-                [metadata],
-                [doc_id]
-            )
-            
-            # 保存到缓存
-            self._image_embedding_cache[image_hash] = embedding
-            
-            # 异步保存缓存
-            asyncio.create_task(self._async_save_image_cache())
-            
-            logger.info(f"图片内容已存储: hash={image_hash}, doc_id={doc_id}")
-            
-        except Exception as e:
-            logger.error(f"存储图片内容失败: {str(e)}", exc_info=True)
-            raise
-
-    def add_react_code(self, code: str, metadata: Dict[str, Any]) -> None:
-        """添加React代码
-        
-        Args:
-            code: 代码内容
-            metadata: 元数据
-        """
-        try:
-            # 确保metadata包含必要的字段
-            metadata = {
-                **metadata,
-                "type": "react_code",
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # 创建文档
-            doc = Document(
-                page_content=code,
-                metadata=metadata
-            )
-            
-            # 添加到向量存储
-            self.context_store.add_documents([doc])
-            
-            logger.info(f"成功添加React代码示例: {metadata.get('description', '')}")
-            
-        except Exception as e:
-            logger.error(f"添加React代码失败: {str(e)}")
-            raise Exception(f"添加React代码失败: {str(e)}")
+        # 使用简单示例文本初始化
+        texts = ["初始化存储示例"]
+        return FAISS.from_texts(texts, self.embeddings)
     
-    def add_prompt_history(self, original: str, optimized: str) -> None:
-        """添加提示优化历史
-        
-        Args:
-            original: 原始提示
-            optimized: 优化后的提示
-        """
-        try:
-            doc = Document(
-                page_content=optimized,
-                metadata={
-                    "type": "prompt_history",
-                    "original": original
-                }
-            )
-            self.context_store.add_documents([doc])
-        except Exception as e:
-            logger.error(f"添加提示历史失败: {str(e)}")
-            raise
-    
-    def add_best_practice(self, practice: str, category: str) -> List[str]:
-        """添加最佳实践
-        
-        Args:
-            practice: 最佳实践内容
-            category: 实践类别（如'架构'、'性能'、'测试'等）
-            
-        Returns:
-            List[str]: 添加的文档ID列表
-        """
-        try:
-            metadata = {
-                "type": "best_practices",
-                "category": category
-            }
-            return self.context_store.add_texts([practice], [metadata])
-        except Exception as e:
-            logger.error(f"添加最佳实践失败: {str(e)}")
-            raise
-    
-    async def similarity_search(
-        self,
-        query: str,
-        k: int = 5,
-        search_type: str = "similarity",
-        cache_key: Optional[str] = None,
-        **kwargs
-    ) -> List[Document]:
-        """执行相似度搜索
-        
-        Args:
-            query: 查询文本
-            k: 返回结果数量
-            search_type: 搜索类型 ("similarity" 或 "mmr")
-            cache_key: 缓存键
-            **kwargs: 额外参数
-            
-        Returns:
-            List[Document]: 搜索结果文档列表
-        """
-        start_time = time.time()
-        
-        # 使用智能缓存管理
-        if not hasattr(self, '_search_cache'):
-            self._search_cache = CacheManager(
-                max_size=settings.VECTOR_STORE_CONFIG.get("search_cache_size", 1000),
-                ttl=settings.VECTOR_STORE_CONFIG.get("search_cache_ttl", 3600)  # 1小时缓存
-            )
-        
-        # 检查缓存
-        if cache_key:
-            cached_results = self._search_cache.get(cache_key)
-            if cached_results is not None:
-                logger.info("使用缓存的搜索结果")
-                return cached_results
-            
-        try:
-            # 获取查询文本的嵌入向量（使用缓存）
-            query_embedding = await self._get_embedding_with_cache(query)
-            
-            # 使用异步信号量限制并发请求数
-            max_concurrent = settings.VECTOR_STORE_CONFIG.get("max_concurrent_requests", 5)
-            if not hasattr(self, '_semaphore'):
-                self._semaphore = asyncio.Semaphore(max_concurrent)
-                
-            async with self._semaphore:
-                # 根据搜索类型选择搜索方法
-                if search_type == "mmr":
-                    results = await asyncio.to_thread(
-                        self.context_store.max_marginal_relevance_search,
-                        query,
-                        k=min(k, settings.VECTOR_STORE_CONFIG.get("max_results", 5)),
-                        fetch_k=min(2*k, settings.VECTOR_STORE_CONFIG.get("max_fetch", 10)),
-                        lambda_mult=settings.VECTOR_STORE_CONFIG.get("mmr_lambda", 0.7),
-                        **kwargs
-                    )
-                else:
-                    results = await asyncio.to_thread(
-                        self.context_store.similarity_search,
-                        query,
-                        k=min(k, settings.VECTOR_STORE_CONFIG.get("max_results", 5)),
-                        **kwargs
-                    )
-                    
-                # 检查查询时间
-                query_time = time.time() - start_time
-                if query_time > settings.VECTOR_STORE_CONFIG.get("slow_query_threshold", 5.0):
-                    logger.warning(f"检测到慢查询: {query_time:.2f}s, query={query}")
-                    
-                # 缓存结果
-                if cache_key:
-                    self._search_cache.set(cache_key, results)
-                    logger.info(f"已缓存搜索结果，键值: {cache_key}")
-                    
-                return results
-                
-        except Exception as e:
-            logger.error(f"相似度搜索失败: {str(e)}")
-            return []
-    
-    def search_prompt_history(
-        self,
-        query: str,
-        k: int = 4,
-        search_type: str = "similarity"
-    ) -> List[str]:
-        """搜索提示优化历史
-        
-        Args:
-            query: 搜索查询
-            k: 返回结果数量
-            search_type: 搜索类型，可选 "similarity" 或 "mmr"
-            
-        Returns:
-            List[str]: 历史优化提示列表
-        """
-        return self.similarity_search(
-            query,
-            k=k,
-            filter_dict={"type": "prompt_history"},
-            search_type=search_type
-        )
-    
-    def search_react_code(
-        self,
-        query: str,
-        k: int = 4,
-        search_type: str = "similarity"
-    ) -> List[str]:
-        """搜索React代码示例
-        
-        Args:
-            query: 搜索查询
-            k: 返回结果数量
-            search_type: 搜索类型，可选 "similarity" 或 "mmr"
-            
-        Returns:
-            List[str]: 相关代码示例列表
-        """
-        return self.similarity_search(
-            query,
-            k=k,
-            filter_dict={"type": "react_code"},
-            search_type=search_type
-        )
-    
-    def search_best_practices(
-        self,
-        query: str,
-        k: int = 4,
-        search_type: str = "similarity"
-    ) -> List[str]:
-        """搜索最佳实践
-        
-        Args:
-            query: 搜索查询
-            k: 返回结果数量
-            search_type: 搜索类型，可选 "similarity" 或 "mmr"
-            
-        Returns:
-            List[str]: 相关最佳实践列表
-        """
-        return self.similarity_search(
-            query,
-            k=k,
-            filter_dict={"type": "best_practices"},
-            search_type=search_type
-        )
-    
-    async def search_contexts(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """搜索上下文
-        
-        Args:
-            query: 查询文本
-            limit: 返回结果数量限制
-            
-        Returns:
-            List[Dict[str, Any]]: 搜索结果
-        """
-        try:
-            # 检查向量数据库是否已初始化
-            if not self.is_ready:
-                logger.warning("向量数据库尚未初始化完成")
-                return []
-                
-            # 搜索向量数据库
-            docs = await self.prompts_store.asimilarity_search(query, k=limit)
-            
-            # 转换结果
-            results = []
-            for doc in docs:
-                results.append({
-                    "text": doc.page_content,
-                    "metadata": doc.metadata
-                })
-                
-            return results
-            
-        except Exception as e:
-            logger.error(f"搜索上下文失败: {str(e)}")
-            return []
-    
-    async def search_texts(
-        self, 
-        query: str, 
-        limit: int = 5,
-        search_type: str = "similarity"
-    ) -> List[Dict[str, Any]]:
-        """搜索文本
-        
-        Args:
-            query: 查询文本
-            limit: 返回结果数量限制
-            search_type: 搜索类型 (similarity/mmr/hybrid)
-            
-        Returns:
-            List[Dict[str, Any]]: 搜索结果
-        """
-        try:
-            # 检查向量数据库是否已初始化
-            if not self.is_ready:
-                logger.warning("向量数据库尚未初始化完成")
-                return []
-            
-            # 根据搜索类型选择搜索方法
-            docs = []
-            if search_type == "similarity":
-                # 相似度搜索
-                docs = await self.prompts_store.asimilarity_search(query, k=limit)
-            elif search_type == "mmr":
-                # 最大边际相关性搜索
-                docs = await self.prompts_store.amax_marginal_relevance_search(
-                    query, k=limit, fetch_k=limit*2
-                )
-            elif search_type == "hybrid":
-                # 混合搜索 (先进行相似度搜索，再进行MMR过滤)
-                similarity_docs = await self.prompts_store.asimilarity_search(query, k=limit*2)
-                
-                # 如果结果数量足够，进行MMR过滤
-                if len(similarity_docs) > limit:
-                    # 提取文本内容
-                    texts = [doc.page_content for doc in similarity_docs]
-                    
-                    # 计算嵌入
-                    embeddings = await self.embeddings.aembed_documents(texts)
-                    
-                    # 计算查询嵌入
-                    query_embedding = await self.embeddings.aembed_query(query)
-                    
-                    # 进行MMR过滤
-                    mmr_indices = self._mmr(
-                        query_embedding, embeddings, 
-                        k=limit, lambda_mult=0.5
-                    )
-                    
-                    # 根据MMR索引选择文档
-                    docs = [similarity_docs[i] for i in mmr_indices]
-                else:
-                    docs = similarity_docs
-            else:
-                # 默认使用相似度搜索
-                logger.warning(f"未知的搜索类型: {search_type}，使用默认的相似度搜索")
-                docs = await self.prompts_store.asimilarity_search(query, k=limit)
-            
-            # 转换结果
-            results = []
-            for doc in docs:
-                results.append({
-                    "text": doc.page_content,
-                    "metadata": doc.metadata
-                })
-                
-            return results
-            
-        except Exception as e:
-            logger.error(f"搜索文本失败: {str(e)}")
-            return []
-    
-    def _mmr(
-        self, 
-        query_embedding: List[float], 
-        embeddings: List[List[float]], 
-        k: int = 5, 
-        lambda_mult: float = 0.5
-    ) -> List[int]:
-        """最大边际相关性算法
-        
-        Args:
-            query_embedding: 查询嵌入
-            embeddings: 文档嵌入列表
-            k: 返回结果数量
-            lambda_mult: 多样性权重
-            
-        Returns:
-            List[int]: 选择的文档索引
-        """
-        import numpy as np
-        from sklearn.metrics.pairwise import cosine_similarity
-        
-        # 转换为numpy数组
-        query_embedding = np.array(query_embedding).reshape(1, -1)
-        embeddings = np.array(embeddings)
-        
-        # 计算文档与查询的相似度
-        sim_query = cosine_similarity(embeddings, query_embedding).reshape(-1)
-        
-        # 初始化已选择和未选择的索引
-        selected_indices = []
-        unselected_indices = list(range(len(embeddings)))
-        
-        # 选择第一个文档（与查询最相似的文档）
-        first_idx = np.argmax(sim_query)
-        selected_indices.append(first_idx)
-        unselected_indices.remove(first_idx)
-        
-        # 迭代选择剩余的文档
-        for _ in range(min(k - 1, len(embeddings) - 1)):
-            # 如果没有未选择的文档，退出循环
-            if not unselected_indices:
-                break
-                
-            # 计算未选择文档与已选择文档的最大相似度
-            sim_selected = np.max(
-                cosine_similarity(
-                    embeddings[unselected_indices], 
-                    embeddings[selected_indices]
-                ), 
-                axis=1
-            )
-            
-            # 计算MMR得分
-            mmr_scores = lambda_mult * sim_query[unselected_indices] - (1 - lambda_mult) * sim_selected
-            
-            # 选择MMR得分最高的文档
-            next_idx = unselected_indices[np.argmax(mmr_scores)]
-            selected_indices.append(next_idx)
-            unselected_indices.remove(next_idx)
-        
-        return selected_indices
-    
-    def _load_doc_cache(self):
-        """加载文档缓存"""
-        try:
-            # 使用智能缓存管理
-            if not hasattr(self, '_doc_cache_manager'):
-                self._doc_cache_manager = CacheManager(
-                    max_size=settings.VECTOR_STORE_CONFIG.get("doc_cache_max_size", 5000),
-                    ttl=settings.VECTOR_STORE_CONFIG.get("doc_cache_ttl", 86400 * 30)  # 30天缓存
-                )
-            
-            if self._doc_cache_file.exists():
-                with open(self._doc_cache_file, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                    for key, value in cache_data.items():
-                        self._doc_cache_manager.set(key, value)
-                logger.info(f"已加载{len(cache_data)}条文档缓存")
-        except Exception as e:
-            logger.warning(f"加载文档缓存失败: {str(e)}")
-        
-    def _save_doc_cache(self):
-        """保存文档缓存"""
-        try:
-            if hasattr(self, '_doc_cache_manager'):
-                self._doc_cache_file.parent.mkdir(parents=True, exist_ok=True)
-                cache_data = {
-                    key: value for key, value in self._doc_cache_manager.cache.items()
-                    if isinstance(value, tuple) and len(value) == 2
-                }
-                with open(self._doc_cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(cache_data, f)
-                logger.info(f"已保存{len(cache_data)}条文档缓存")
-        except Exception as e:
-            logger.warning(f"保存文档缓存失败: {str(e)}")
-
-    def _get_doc_cache_key(self, text: str, metadata: Optional[Dict] = None) -> str:
-        """生成文档缓存键
-        
-        Args:
-            text: 文本内容
-            metadata: 元数据
-            
-        Returns:
-            str: 缓存键
-        """
-        import hashlib
-        # 组合文本和元数据生成唯一键
-        cache_data = f"{text}_{json.dumps(metadata, sort_keys=True) if metadata else ''}"
-        return hashlib.md5(cache_data.encode('utf-8')).hexdigest()
-
     async def add_texts(
         self,
         texts: List[str],
         metadatas: Optional[List[Dict[str, Any]]] = None,
-        ids: Optional[List[str]] = None,
         store_type: str = "contexts"
     ) -> List[str]:
         """添加文本到向量存储
         
         Args:
-            texts: 文本列表
+            texts: 要添加的文本列表
             metadatas: 元数据列表
-            ids: 文档ID列表
-            store_type: 存储类型 ("templates" 或 "contexts")
+            store_type: 存储类型
             
         Returns:
-            List[str]: 添加的文档ID列表
+            List[str]: 文档ID列表
         """
+        if not texts:
+            return []
+                
+        store = self.stores.get(store_type)
+        if not store:
+            raise ValueError(f"未找到向量存储: {store_type}")
+            
+        # 获取嵌入向量
+        embeddings = await self._get_embeddings_batch(texts)
+        
+        # 添加到向量存储
         try:
-            # 选择存储
-            store = self.template_store if store_type == "templates" else self.context_store
+            ids = store.add_embeddings(
+                text_embeddings=list(zip(texts, embeddings)),
+                metadatas=metadatas
+            )
             
-            # 进行语义去重
-            unique_texts, unique_metadatas = await self._semantic_deduplication(texts, metadatas)
+            # 保存更新后的索引
+            store.save_local(str(self.storage_dir / store_type))
             
-            if not unique_texts:
-                logger.warning("所有文本都被去重过滤，没有新内容需要添加")
-                return []
-            
-            # 添加到向量存储
-            try:
-                doc_ids = store.add_texts(
-                    texts=unique_texts,
-                    metadatas=unique_metadatas,
-                    ids=ids[:len(unique_texts)] if ids else None
-                )
-                
-                # 保存存储
-                store_path = Path(settings.VECTOR_DB_PATH) / store_type
-                store.save_local(str(store_path))
-                
-                logger.info(f"成功添加{len(doc_ids)}条文本到{store_type}向量存储")
-                return doc_ids
-                
-            except Exception as e:
-                logger.error(f"添加文本到向量存储失败: {str(e)}")
-                raise
+            return ids
             
         except Exception as e:
-            logger.error(f"处理文本添加失败: {str(e)}")
+            logger.error(f"添加文本到向量存储失败: {str(e)}")
             raise
-
-    async def _async_save_doc_cache(self):
-        """异步保存文档缓存"""
-        try:
-            await asyncio.to_thread(self._save_doc_cache)
-        except Exception as e:
-            logger.error(f"异步保存文档缓存失败: {str(e)}")
-
-    async def _get_embeddings_batch_with_cache(self, texts: List[str]) -> List[List[float]]:
-        """批量获取带缓存的嵌入向量
-        
-        Args:
-            texts: 文本列表
             
-        Returns:
-            List[List[float]]: 嵌入向量列表
-        """
-        try:
-            embeddings = []
-            for text in texts:
-                try:
-                    embedding = await self._get_embedding_with_cache(text)
-                    embeddings.append(embedding)
-                except Exception as e:
-                    logger.error(f"获取嵌入向量失败: {str(e)}")
-                    # 使用零向量作为fallback
-                    dim = settings.VECTOR_STORE_CONFIG.get("embedding_dimensions", 64)
-                    embeddings.append([0.0] * dim)
-            return embeddings
-        except Exception as e:
-            logger.error(f"批量获取嵌入向量失败: {str(e)}")
-            # 返回零向量列表作为fallback
-            dim = settings.VECTOR_STORE_CONFIG.get("embedding_dimensions", 64)
-            return [[0.0] * dim for _ in texts]
-
-    def calculate_similarity(self, text1: str, text2: str) -> float:
-        """计算两个文本的语义相似度
-        
-        Args:
-            text1: 第一个文本
-            text2: 第二个文本
-            
-        Returns:
-            float: 相似度得分
-        """
-        try:
-            # 获取文本的嵌入向量
-            embedding1 = self.embeddings.embed_query(text1)
-            embedding2 = self.embeddings.embed_query(text2)
-            
-            # 计算余弦相似度
-            return self.calculate_vector_similarity(embedding1, embedding2)
-        except Exception as e:
-            logger.error(f"计算相似度失败: {str(e)}")
-            return 0.0
-
-    def _test_embeddings(self):
-        """测试嵌入功能"""
-        try:
-            # 检查缓存文件是否存在且未过期
-            cache_status_file = Path(settings.VECTOR_DB_PATH) / "embedding_test_status.json"
-            current_time = time.time()
-            
-            if cache_status_file.exists():
-                try:
-                    with open(cache_status_file, 'r', encoding='utf-8') as f:
-                        status = json.load(f)
-                    # 检查缓存是否在24小时内
-                    if current_time - status.get('last_test_time', 0) < 86400:
-                        logger.info("使用缓存的嵌入测试状态")
-                        return True
-                except Exception:
-                    pass
-            
-            # 使用最短的测试文本和批处理
-            test_texts = ["a", "b", "c"]  # 使用多个短文本进行批量测试
-            
-            # 使用dimension_reduction参数减少维度
-            test_embeddings = self.embeddings.embed_documents(test_texts)
-            
-            # 验证所有嵌入向量
-            for embedding in test_embeddings:
-                if len(embedding) <= 0:
-                    raise ValueError("嵌入维度无效")
-                
-            # 更新测试状态缓存
-            cache_status_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(cache_status_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'last_test_time': current_time,
-                    'test_dim': len(test_embeddings[0]),
-                    'model': settings.EMBEDDING_MODEL,
-                    'batch_size': len(test_texts)
-                }, f)
-            
-            logger.info(f"嵌入测试成功，使用{len(test_texts)}个文本进行批量测试")
-            return True
-            
-        except Exception as e:
-            logger.error(f"嵌入测试失败: {str(e)}")
-            raise
-
-    def _init_stores(self):
-        """初始化向量存储"""
-        try:
-            # 确保嵌入模型已初始化
-            if not hasattr(self, '_embeddings') or self._embeddings is None:
-                logger.error("嵌入模型未初始化")
-                raise ValueError("嵌入模型未初始化")
-            
-            # 确保存储目录存在
-            Path(settings.VECTOR_DB_PATH).mkdir(parents=True, exist_ok=True)
-            
-            # 初始化contexts存储
-            try:
-                contexts_path = os.path.join(settings.VECTOR_DB_PATH, "contexts")
-                logger.info(f"初始化contexts存储: {contexts_path}")
-                
-                if self.use_mock:
-                    self.context_store = Mock()
-                    logger.info("使用Mock contexts存储")
-                else:
-                    # 创建FAISS索引，不使用persist_directory参数
-                    self.context_store = FAISS.from_texts(
-                        ["示例上下文"],
-                        self._embeddings,
-                        metadatas=[{"source": "示例", "type": "context"}]
-                    )
-                    
-                    # 如果目录存在，尝试加载现有索引
-                    if os.path.exists(contexts_path) and os.path.isdir(contexts_path):
-                        try:
-                            loaded_store = FAISS.load_local(
-                                contexts_path,
-                                self._embeddings,
-                                allow_dangerous_deserialization=True
-                            )
-                            self.context_store = loaded_store
-                            logger.info(f"从{contexts_path}加载现有索引")
-                        except Exception as e:
-                            logger.warning(f"加载现有索引失败: {str(e)}，将使用新创建的索引")
-                    
-                    # 保存索引
-                    self.context_store.save_local(contexts_path)
-                    logger.info(f"contexts存储已保存到: {contexts_path}")
-                
-                logger.info("contexts存储初始化成功")
-                
-            except Exception as e:
-                logger.error(f"初始化contexts存储失败: {str(e)}")
-                raise
-            
-            # 初始化templates存储
-            try:
-                templates_path = os.path.join(settings.VECTOR_DB_PATH, "templates")
-                logger.info(f"初始化templates存储: {templates_path}")
-                
-                if self.use_mock:
-                    self.template_store = Mock()
-                    logger.info("使用Mock templates存储")
-                else:
-                    # 创建FAISS索引，不使用persist_directory参数
-                    self.template_store = FAISS.from_texts(
-                        ["示例模板"],
-                        self._embeddings,
-                        metadatas=[{"source": "示例", "type": "template"}]
-                    )
-                    
-                    # 如果目录存在，尝试加载现有索引
-                    if os.path.exists(templates_path) and os.path.isdir(templates_path):
-                        try:
-                            loaded_store = FAISS.load_local(
-                                templates_path,
-                                self._embeddings,
-                                allow_dangerous_deserialization=True
-                            )
-                            self.template_store = loaded_store
-                            logger.info(f"从{templates_path}加载现有索引")
-                        except Exception as e:
-                            logger.warning(f"加载现有索引失败: {str(e)}，将使用新创建的索引")
-                    
-                    # 保存索引
-                    self.template_store.save_local(templates_path)
-                    logger.info(f"templates存储已保存到: {templates_path}")
-                
-                logger.info("templates存储初始化成功")
-                
-            except Exception as e:
-                logger.error(f"初始化templates存储失败: {str(e)}")
-                raise
-            
-            # 初始化prompts存储
-            try:
-                prompts_path = os.path.join(settings.VECTOR_DB_PATH, "prompts")
-                logger.info(f"初始化prompts存储: {prompts_path}")
-                
-                if self.use_mock:
-                    self.prompts_store = Mock()
-                    logger.info("使用Mock prompts存储")
-                else:
-                    # 创建FAISS索引，不使用persist_directory参数
-                    self.prompts_store = FAISS.from_texts(
-                        ["示例prompt"],
-                        self._embeddings,
-                        metadatas=[{"source": "示例", "type": "prompt"}]
-                    )
-                    
-                    # 如果目录存在，尝试加载现有索引
-                    if os.path.exists(prompts_path) and os.path.isdir(prompts_path):
-                        try:
-                            loaded_store = FAISS.load_local(
-                                prompts_path,
-                                self._embeddings,
-                                allow_dangerous_deserialization=True
-                            )
-                            self.prompts_store = loaded_store
-                            logger.info(f"从{prompts_path}加载现有索引")
-                        except Exception as e:
-                            logger.warning(f"加载现有索引失败: {str(e)}，将使用新创建的索引")
-                    
-                    # 保存索引
-                    self.prompts_store.save_local(prompts_path)
-                    logger.info(f"prompts存储已保存到: {prompts_path}")
-                
-                logger.info("prompts存储初始化成功")
-                
-            except Exception as e:
-                logger.error(f"初始化prompts存储失败: {str(e)}")
-                raise
-            
-            # 初始化designs存储
-            try:
-                designs_path = os.path.join(settings.VECTOR_DB_PATH, "designs")
-                logger.info(f"初始化designs存储: {designs_path}")
-                
-                if self.use_mock:
-                    self.designs_store = Mock()
-                    logger.info("使用Mock designs存储")
-                else:
-                    # 创建FAISS索引，不使用persist_directory参数
-                    self.designs_store = FAISS.from_texts(
-                        ["示例设计"],
-                        self._embeddings,
-                        metadatas=[{"source": "示例", "type": "design"}]
-                    )
-                    
-                    # 如果目录存在，尝试加载现有索引
-                    if os.path.exists(designs_path) and os.path.isdir(designs_path):
-                        try:
-                            loaded_store = FAISS.load_local(
-                                designs_path,
-                                self._embeddings,
-                                allow_dangerous_deserialization=True
-                            )
-                            self.designs_store = loaded_store
-                            logger.info(f"从{designs_path}加载现有索引")
-                        except Exception as e:
-                            logger.warning(f"加载现有索引失败: {str(e)}，将使用新创建的索引")
-                    
-                    # 保存索引
-                    self.designs_store.save_local(designs_path)
-                    logger.info(f"designs存储已保存到: {designs_path}")
-                
-                logger.info("designs存储初始化成功")
-                
-            except Exception as e:
-                logger.error(f"初始化designs存储失败: {str(e)}")
-                raise
-            
-        except Exception as e:
-            logger.error(f"初始化向量存储失败: {str(e)}")
-            self._initialization_error = str(e)
-            raise
-        
-    def _init_mock_data(self):
-        """初始化mock数据"""
-        logger.info("初始化mock数据...")
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed_documents.return_value = [[0.1] * 1536, [0.2] * 1536]
-        mock_embeddings.embed_query.return_value = [0.1] * 1536
-
-    async def _semantic_deduplication(
-        self,
-        texts: List[str],
-        metadatas: Optional[List[Dict[str, Any]]] = None
-    ) -> tuple[List[str], Optional[List[Dict[str, Any]]]]:
-        """语义去重
-        
-        Args:
-            texts: 文本列表
-            metadatas: 元数据列表
-            
-        Returns:
-            tuple[List[str], Optional[List[Dict[str, Any]]]]: 去重后的文本和元数据
-        """
-        try:
-            if not texts:
-                return texts, metadatas
-                
-            # 使用较低的阈值进行快速去重
-            threshold = settings.VECTOR_STORE_CONFIG.get("deduplication_threshold", 0.95)
-            min_length = settings.VECTOR_STORE_CONFIG.get("min_dedup_length", 10)
-            
-            # 对短文本跳过去重
-            if all(len(text) < min_length for text in texts):
-                return texts, metadatas
-            
-            try:
-                # 使用批量嵌入处理
-                embeddings = await self._get_embeddings_batch_with_cache(texts)
-                if not embeddings or len(embeddings) != len(texts):
-                    logger.error("获取嵌入向量失败或数量不匹配")
-                    return texts, metadatas
-                
-                # 使用numpy进行向量化计算
-                embeddings_array = np.array(embeddings, dtype=np.float32)
-                norms = np.linalg.norm(embeddings_array, axis=1, keepdims=True)
-                
-                # 避免除零错误
-                mask = norms > 1e-10
-                norms[~mask] = 1e-10
-                
-                # 计算余弦相似度矩阵
-                normalized_embeddings = embeddings_array / norms
-                similarity_matrix = np.dot(normalized_embeddings, normalized_embeddings.T)
-                
-                # 使用掩码避免自身比较
-                np.fill_diagonal(similarity_matrix, 0)
-                
-                # 找出需要保留的索引
-                keep_indices = []
-                for i in range(len(texts)):
-                    # 如果当前文本与已保留的文本相似度都低于阈值，则保留
-                    if not keep_indices or not any(similarity_matrix[i][j] > threshold for j in keep_indices):
-                        keep_indices.append(i)
-                
-                # 保留未重复的文本和元数据
-                unique_texts = [texts[i] for i in keep_indices]
-                unique_metadatas = [metadatas[i] for i in keep_indices] if metadatas else None
-                
-                # 记录去重结果
-                removed_count = len(texts) - len(unique_texts)
-                if removed_count > 0:
-                    logger.info(f"语义去重移除了 {removed_count} 个重复文本")
-                
-                return unique_texts, unique_metadatas
-                
-            except np.linalg.LinAlgError as e:
-                logger.error(f"向量计算错误: {str(e)}")
-                return texts, metadatas
-                
-        except Exception as e:
-            logger.error(f"语义去重失败: {str(e)}")
-            return texts, metadatas
-        
-    async def _rerank_results(
-        self,
-        query: str,
-        results: List[Any],
-        top_k: int = 3
-    ) -> List[Any]:
-        """重排序搜索结果
+    async def similarity_search(
+        self, 
+        query: str, 
+        top_k: int = 5,
+        store_type: str = "contexts",
+        threshold: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """使用ANN进行相似度搜索
         
         Args:
             query: 查询文本
-            results: 原始结果列表
-            top_k: 重排序后保留的结果数量
+            top_k: 返回结果数量
+            store_type: 存储类型
+            threshold: 相似度阈值
             
         Returns:
-            List[Any]: 重排序后的结果
+            List[Dict[str, Any]]: 搜索结果列表
         """
-        if not results or len(results) <= 1:
+        with performance_monitor.measure_time(
+            "vector_search", 
+            query=query,
+            store_type=store_type
+        ):
+            store = self.stores.get(store_type)
+            if not store:
+                raise ValueError(f"未找到向量存储: {store_type}")
+                
+            # 获取查询向量
+            query_embedding = await self._get_embedding(query)
+            
+            # 使用FAISS的ANN搜索
+            docs_and_scores = store.similarity_search_with_score_by_vector(
+                embedding=query_embedding,
+                k=top_k
+            )
+            
+            results = []
+            for doc, score in docs_and_scores:
+                # 转换余弦相似度到0-1范围
+                similarity = 1 - score / 2
+                
+                if similarity >= threshold:
+                    results.append({
+                        'content': doc.page_content,
+                        'metadata': doc.metadata,
+                        'similarity': similarity
+                    })
+            
+            # 更新性能监控的结果数量
+            performance_monitor.metrics["vector_search"][-1]["result_count"] = len(results)
+                
             return results
             
-        # 计算查询向量
-        query_embedding = self.embeddings.embed_query(query)
-        
-        # 计算每个结果的得分
-        scored_results = []
-        for doc in results:
-            doc_embedding = self.embeddings.embed_query(doc.page_content)
-            
-            # 计算语义相似度
-            semantic_score = self.calculate_similarity(query_embedding, doc_embedding)
-            
-            # 计算时间衰减因子（如果有时间戳）
-            time_decay = 1.0
-            if doc.metadata and "timestamp" in doc.metadata:
-                age = (datetime.now() - datetime.fromisoformat(doc.metadata["timestamp"])).total_seconds()
-                time_decay = 1.0 / (1.0 + age / 86400)  # 24小时衰减
-                
-            # 计算最终得分
-            final_score = semantic_score * 0.7 + time_decay * 0.3
-            
-            scored_results.append((doc, final_score))
-            
-        # 按得分排序并返回top_k结果
-        scored_results.sort(key=lambda x: x[1], reverse=True)
-        return [doc for doc, _ in scored_results[:top_k]]
-        
-    @staticmethod
-    def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
-        """计算两个向量的余弦相似度
+    async def _get_embedding(self, text: str) -> List[float]:
+        """获取文本的嵌入向量
         
         Args:
-            vec1: 第一个向量
-            vec2: 第二个向量
-            
-        Returns:
-            float: 相似度得分
-        """
-        try:
-            vec1 = np.array(vec1)
-            vec2 = np.array(vec2)
-            similarity = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-            return float(similarity)
-        except Exception as e:
-            logger.error(f"计算向量相似度失败: {str(e)}")
-            return 0.0
-
-    def _load_embedding_cache(self):
-        """加载嵌入缓存"""
-        try:
-            if self._embedding_cache_file.exists():
-                import gzip
-                with gzip.open(str(self._embedding_cache_file) + '.gz', 'rt', encoding='utf-8') as f:
-                    self._embedding_cache = json.load(f)
-                logger.info(f"已加载{len(self._embedding_cache)}条嵌入缓存")
-                
-                # 验证缓存数据的维度
-                if self._embedding_cache:
-                    first_key = next(iter(self._embedding_cache))
-                    embedding_dim = len(self._embedding_cache[first_key])
-                    expected_dim = settings.VECTOR_STORE_CONFIG.get("embedding_dimensions", 64)
-                    if embedding_dim != expected_dim:
-                        logger.warning(f"缓存的嵌入维度({embedding_dim})与配置维度({expected_dim})不匹配，清空缓存")
-                        self._embedding_cache = {}
-                    
-        except Exception as e:
-            logger.warning(f"加载嵌入缓存失败: {str(e)}")
-            self._embedding_cache = {}
-            
-    def _save_embedding_cache(self):
-        """保存嵌入缓存"""
-        try:
-            # 确保目录存在
-            self._embedding_cache_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 使用gzip压缩存储
-            import gzip
-            with gzip.open(str(self._embedding_cache_file) + '.gz', 'wt', encoding='utf-8') as f:
-                # 转换numpy数组为列表以便JSON序列化
-                cache_data = {
-                    key: embedding.tolist() if isinstance(embedding, np.ndarray) else embedding
-                    for key, embedding in self._embedding_cache.items()
-                }
-                json.dump(cache_data, f)
-            logger.info(f"已压缩保存{len(self._embedding_cache)}条嵌入缓存")
-        except Exception as e:
-            logger.warning(f"保存嵌入缓存失败: {str(e)}")
-            
-    def _get_cache_key(self, text: str) -> str:
-        """生成缓存键
-        
-        Args:
-            text: 文本内容
-            
-        Returns:
-            str: 缓存键
-        """
-        import hashlib
-        # 使用文本的hash作为缓存键，限制文本长度以提高效率
-        max_length = settings.VECTOR_STORE_CONFIG.get("max_cache_key_length", 1000)
-        text = text[:max_length]
-        return hashlib.md5(text.encode('utf-8')).hexdigest()
-        
-    async def _get_embedding_with_cache(self, text: str) -> List[float]:
-        """获取带缓存的嵌入向量
-        
-        Args:
-            text: 文本内容
+            text: 输入文本
             
         Returns:
             List[float]: 嵌入向量
         """
-        cache_key = self._get_cache_key(text)
-        
-        # 检查缓存
-        if cache_key in self._embedding_cache:
-            embedding = self._embedding_cache[cache_key]
-            # 验证维度
-            if len(embedding) == settings.VECTOR_STORE_CONFIG.get("embedding_dimensions", 64):
-                logger.debug(f"使用缓存的嵌入向量: {cache_key}")
-                return embedding
-            else:
-                # 维度不匹配，删除缓存
-                del self._embedding_cache[cache_key]
-        
         try:
-            # 获取新的嵌入向量
-            if not hasattr(self, '_embeddings') or self._embeddings is None:
-                logger.error("嵌入模型未初始化")
-                raise ValueError("嵌入模型未初始化，无法获取嵌入向量")
-                
-            embedding = self._embeddings.embed_query(
+            embedding = await asyncio.to_thread(
+                self.embeddings.embed_query,
                 text
             )
-            
-            # 更新缓存
-            self._embedding_cache[cache_key] = embedding
-            
-            # 使用LRU策略管理缓存大小
-            max_size = settings.VECTOR_STORE_CONFIG["embedding_cache"]["max_size"]
-            if len(self._embedding_cache) > max_size:
-                # 删除最早添加的20%条目
-                num_to_delete = max_size // 5
-                keys_to_delete = list(self._embedding_cache.keys())[:num_to_delete]
-                for key in keys_to_delete:
-                    del self._embedding_cache[key]
-            
-            # 异步保存缓存
-            if len(self._embedding_cache) % 100 == 0:  # 每100次更新保存一次
-                asyncio.create_task(self._async_save_cache())
-            
             return embedding
         except Exception as e:
-            logger.error(f"获取嵌入向量失败: {str(e)}")
-            # 返回空向量而不是抛出异常，保证系统可用性
-            return [0.0] * settings.VECTOR_STORE_CONFIG.get("embedding_dimensions", 64)
-        
-    async def _async_save_cache(self):
-        """异步保存缓存"""
-        try:
-            await asyncio.to_thread(self._save_embedding_cache)
-        except Exception as e:
-            logger.error(f"异步保存缓存失败: {str(e)}")
-        
-    def add_template(self, template: str) -> str:
-        """添加模板到向量存储
-        
-        Args:
-            template: 模板内容
-            
-        Returns:
-            str: 添加的文档ID
-        """
-        try:
-            # 创建元数据
-            metadata = {
-                "type": "template",
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # 添加到向量存储
-            doc_ids = self.template_store.add_texts(
-                [template],
-                [metadata]
-            )
-            
-            # 保存到本地
-            template_path = Path(settings.VECTOR_DB_PATH) / "templates"
-            self.template_store.save_local(str(template_path))
-            
-            logger.info("成功添加模板到向量存储")
-            return doc_ids[0]
-            
-        except Exception as e:
-            logger.error(f"添加模板失败: {str(e)}")
+            logger.error(f"获取文本嵌入向量失败: {str(e)}")
             raise
 
-    async def validate_insert(self, content: str, store_type: str = "contexts") -> bool:
-        """验证内容是否可以插入（避免重复）
+    async def _get_embeddings_batch(
+        self,
+        texts: List[str],
+        batch_size: int = 20
+    ) -> List[List[float]]:
+        """批量获取文本的嵌入向量
         
         Args:
-            content: 要验证的内容
-            store_type: 存储类型 ("templates" 或 "contexts")
+            texts: 文本列表
+            batch_size: 批处理大小
             
         Returns:
-            bool: 是否成功插入
+            List[List[float]]: 嵌入向量列表
+        """
+        embeddings = []
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                batch_embeddings = await asyncio.to_thread(
+                    self.embeddings.embed_documents,
+                    batch
+                )
+                embeddings.extend(batch_embeddings)
+            except Exception as e:
+                logger.error(f"批量获取嵌入向量失败: {str(e)}")
+                raise
+
+        return embeddings
+
+    def is_initialized(self) -> bool:
+        """检查向量存储是否已初始化
+        
+        Returns:
+            bool: 向量存储是否已初始化
+        """
+        return hasattr(self, 'stores') and bool(self.stores)
+        
+    def is_ready(self) -> bool:
+        """检查向量存储是否就绪，可以处理请求
+        
+        Returns:
+            bool: 向量存储是否就绪
+        """
+        # 检查是否已初始化并且stores中至少有一个store可用
+        if not self.is_initialized():
+            return False
+            
+        # 检查是否至少有一个存储类型可用
+        for store_type in self.stores:
+            if self.stores[store_type] is not None:
+                return True
+                
+        return False
+        
+    def get_initialization_error(self) -> str:
+        """获取初始化过程中的错误信息
+        
+        Returns:
+            str: 错误信息
+        """
+        if not hasattr(self, 'stores'):
+            return "向量存储未正确初始化"
+        if not self.stores:
+            return "向量存储为空"
+        return ""
+        
+    async def get_store_stats(self) -> Dict[str, Dict[str, Any]]:
+        """获取各存储的统计信息
+        
+        Returns:
+            Dict[str, Dict[str, Any]]: 各存储的统计信息
+        """
+        stats = {}
+        
+        for store_type, store in self.stores.items():
+            if store is not None:
+                # 获取实例的一些基本统计信息
+                doc_count = 0
+                index_size = 0
+                
+                # 尝试获取文档数量
+                if hasattr(store, "docstore") and hasattr(store.docstore, "docs"):
+                    doc_count = len(store.docstore.docs)
+                    
+                # 尝试获取索引大小
+                if hasattr(store, "index"):
+                    try:
+                        # 尝试使用ntotal属性（FAISS索引通常有这个属性）
+                        if hasattr(store.index, "ntotal"):
+                            index_size = store.index.ntotal
+                        # 尝试使用len()
+                        else:
+                            try:
+                                index_size = len(store.index)
+                            except (TypeError, AttributeError):
+                                # 如果都不支持，则使用0作为默认值
+                                index_size = 0
+                    except Exception as e:
+                        logger.warning(f"获取索引大小失败: {str(e)}")
+                        index_size = 0
+                
+                stats[store_type] = {
+                    "available": True,
+                    "document_count": doc_count,
+                    "index_size": index_size
+                }
+            else:
+                stats[store_type] = {
+                    "available": False,
+                    "error": "存储实例为空"
+                }
+                
+        return stats
+        
+    async def wait_until_ready(self, timeout: int = 10) -> bool:
+        """等待向量存储初始化完成
+        
+        Args:
+            timeout: 超时时间（秒）
+            
+        Returns:
+            bool: 是否初始化成功
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.is_ready():
+                return True
+            await asyncio.sleep(0.5)
+        return False
+        
+    def optimize_index(self, store_type: str = "contexts"):
+        """优化向量索引
+        
+        Args:
+            store_type: 存储类型
+        """
+        store = self.stores.get(store_type)
+        if not store:
+            raise ValueError(f"未找到向量存储: {store_type}")
+            
+        try:
+            # 获取原始索引
+            index = store.index
+            
+            # 训练量化器
+            quantizer = faiss.IndexFlatL2(index.d)
+            index = faiss.IndexIVFFlat(quantizer, index.d, min(index.ntotal, 100))
+            
+            # 训练索引
+            if index.is_trained:
+                logger.info("索引已训练，跳过训练步骤")
+            else:
+                logger.info("开始训练索引...")
+                train_vectors = index.reconstruct_n(0, index.ntotal)
+                index.train(train_vectors)
+                
+            # 添加向量到新索引
+            vectors = [index.reconstruct(i) for i in range(index.ntotal)]
+            index.add(np.array(vectors))
+            
+            # 更新存储的索引
+            store.index = index
+            
+            # 保存优化后的索引
+            store.save_local(str(self.storage_dir / store_type))
+            
+            logger.info(f"向量索引 {store_type} 优化完成")
+        except Exception as e:
+            logger.error(f"优化向量索引失败: {str(e)}")
+            raise
+            
+    async def get_relevant_context(
+        self,
+        query: str,
+        store_type: str = "contexts",
+        top_k: int = 5,
+        max_tokens: int = 2000
+    ) -> str:
+        """获取相关上下文
+        
+        Args:
+            query: 查询文本
+            store_type: 存储类型
+            top_k: 返回结果数量
+            max_tokens: 最大token数量
+            
+        Returns:
+            str: 相关上下文
         """
         try:
-            # 选择存储
-            store = self.template_store if store_type == "templates" else self.context_store
+            # 搜索相似内容
+            results = await self.similarity_search(
+                query=query,
+                top_k=top_k,
+                store_type=store_type
+            )
             
-            # 获取内容的嵌入向量
-            content_embedding = await self._get_embedding_with_cache(content)
-            
-            # 搜索最相似的结果
-            results = store.similarity_search_with_score(content, k=1)
-            
-            if results:
-                # 获取最相似结果的向量
-                result_embedding = await self._get_embedding_with_cache(results[0][0].page_content)
+            if not results:
+                return ""
                 
-                # 计算余弦相似度
-                similarity = np.dot(content_embedding, result_embedding) / (
-                    np.linalg.norm(content_embedding) * np.linalg.norm(result_embedding))
+            # 组合上下文
+            context = ""
+            for i, result in enumerate(results):
+                content = result.get('content', '')
+                similarity = result.get('similarity', 0)
+                source = result.get('metadata', {}).get('source', 'unknown')
                 
-                # 使用较高的阈值确保精确匹配
-                return similarity < settings.VECTOR_STORE_CONFIG["deduplication_threshold"]
+                # 简单的token估算
+                if len(context) + len(content) > max_tokens * 4:  # 粗略估计字符数是token数的4倍
+                    break
+                    
+                context += f"\n\n来源 {i+1} ({source}, 相似度: {similarity:.2f}):\n{content}"
+                
+            return context.strip()
             
+        except Exception as e:
+            logger.error(f"获取相关上下文失败: {str(e)}")
+            return ""
+            
+    def save(self):
+        """保存所有向量存储"""
+        for store_type, store in self.stores.items():
+            try:
+                store.save_local(str(self.storage_dir / store_type))
+                logger.info(f"向量存储 {store_type} 已保存")
+            except Exception as e:
+                logger.error(f"保存向量存储 {store_type} 失败: {str(e)}")
+                
+    def reset(self, store_type: Optional[str] = None):
+        """重置向量存储
+        
+        Args:
+            store_type: 要重置的存储类型，如果为None则重置所有
+        """
+        if store_type:
+            store_types = [store_type]
+        else:
+            store_types = list(self.stores.keys())
+            
+        for st in store_types:
+            try:
+                # 创建新的存储
+                self.stores[st] = self._create_new_store()
+                
+                # 保存
+                self.stores[st].save_local(str(self.storage_dir / st))
+                
+                logger.info(f"向量存储 {st} 已重置")
+            except Exception as e:
+                logger.error(f"重置向量存储 {st} 失败: {str(e)}")
+                
+    async def add_prompt(self, prompt: str) -> Optional[str]:
+        """添加prompt到向量存储
+        
+        Args:
+            prompt: 要添加的prompt
+            
+        Returns:
+            Optional[str]: 文档ID，如果添加失败则返回None
+        """
+        try:
+            # 检查store是否存在
+            if "prompts" not in self.stores or self.stores["prompts"] is None:
+                logger.warning("prompts存储不存在，尝试初始化")
+                self.stores["prompts"] = self._create_new_store()
+                
+            # 添加到向量存储
+            metadata = {
+                "timestamp": datetime.now().isoformat(),
+                "source": "user_submitted",
+                "type": "prompt"
+            }
+            
+            doc_ids = await self.add_texts(
+                texts=[prompt],
+                metadatas=[metadata],
+                store_type="prompts"
+            )
+            
+            if doc_ids and len(doc_ids) > 0:
+                logger.info(f"成功添加prompt到向量存储，ID: {doc_ids[0]}")
+                return doc_ids[0]
+            else:
+                logger.warning("添加prompt未返回文档ID")
+                return None
+                
+        except Exception as e:
+            logger.error(f"添加prompt到向量存储失败: {str(e)}")
+            if settings.DEBUG:
+                logger.debug("详细错误信息:", exc_info=True)
+            return None
+            
+    def add_prompt_history(self, original_prompt: str, optimized_prompt: str) -> bool:
+        """记录prompt历史到简单存储（非向量）
+        
+        这是一个降级方法，当向量存储不可用时使用
+        
+        Args:
+            original_prompt: 原始prompt
+            optimized_prompt: 优化后的prompt
+            
+        Returns:
+            bool: 是否成功记录
+        """
+        try:
+            # 创建历史记录文件
+            history_dir = self.storage_dir.parent / "prompt_history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            history_file = history_dir / f"prompt_history_{timestamp}.json"
+            
+            # 保存历史记录
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "timestamp": datetime.now().isoformat(),
+                    "original_prompt": original_prompt,
+                    "optimized_prompt": optimized_prompt
+                }, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"成功记录prompt历史到文件: {history_file}")
             return True
             
         except Exception as e:
-            logger.error(f"验证插入失败: {str(e)}")
+            logger.error(f"记录prompt历史失败: {str(e)}")
             return False
-        
-    def _load_or_create_store(self, store_type: str) -> FAISS:
-        """加载或创建向量存储
-        
-        Args:
-            store_type: 存储类型 (contexts/templates)
             
-        Returns:
-            FAISS: 向量存储实例
-        """
-        store_path = Path(settings.VECTOR_DB_PATH) / store_type
-        
-        try:
-            # 如果存储目录存在，尝试加载
-            if store_path.exists():
-                store = FAISS.load_local(
-                    str(store_path), 
-                    self.embeddings,
-                    allow_dangerous_deserialization=True
-                )
-                logger.info(f"成功加载现有的{store_type}向量存储")
-            else:
-                # 创建新的存储
-                store = FAISS.from_texts(
-                    texts=["初始化文档"],
-                    embedding=self.embeddings,
-                    metadatas=[{"type": store_type}]
-                )
-                # 保存存储
-                store.save_local(str(store_path))
-                logger.info(f"创建并保存新的{store_type}向量存储")
-                
-            return store
-            
-        except Exception as e:
-            logger.error(f"加载或创建{store_type}向量存储失败: {str(e)}")
-            raise
-        
-    async def save(self):
-        """保存向量存储"""
-        try:
-            # 保存上下文存储
-            if hasattr(self, 'context_store'):
-                context_path = Path(settings.VECTOR_DB_PATH) / "contexts"
-                self.context_store.save_local(str(context_path))
-                logger.info("成功保存上下文向量存储")
-            
-            # 保存模板存储
-            if hasattr(self, 'template_store'):
-                template_path = Path(settings.VECTOR_DB_PATH) / "templates"
-                self.template_store.save_local(str(template_path))
-                logger.info("成功保存模板向量存储")
-            
-            # 保存文本嵌入缓存
-            self._save_embedding_cache()
-            
-            # 保存图片嵌入缓存
-            self._save_image_embedding_cache()
-            
-            logger.info("向量存储保存完成")
-            
-        except Exception as e:
-            logger.error(f"保存向量存储失败: {str(e)}")
-            raise
-        
-    async def _get_image_embedding(self, image_data: bytes) -> List[float]:
-        """获取图片的嵌入向量
+    async def add_content(
+        self,
+        content: str,
+        content_type: str = "contexts",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """添加单个内容到向量存储
         
         Args:
-            image_data: 图片数据
+            content: 要添加的内容
+            content_type: 内容类型
+            metadata: 元数据
             
         Returns:
-            List[float]: 图片的嵌入向量
+            Optional[str]: 文档ID，如果添加失败则返回None
         """
         try:
-            # 计算图片数据的hash作为缓存键
-            import hashlib
-            cache_key = hashlib.md5(image_data).hexdigest()
+            # 添加到向量存储
+            doc_ids = await self.add_texts(
+                texts=[content],
+                metadatas=[metadata] if metadata else None,
+                store_type=content_type
+            )
             
-            # 检查缓存
-            if cache_key in self._image_embedding_cache:
-                logger.info("使用缓存的图片嵌入向量")
-                return self._image_embedding_cache[cache_key]
-            
-            # 图片预处理
-            try:
-                from PIL import Image
-                import io
-                
-                # 打开并验证图片
-                img = Image.open(io.BytesIO(image_data))
-                img_format = img.format or 'PNG'
-                
-                # 转换为RGB模式
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                    logger.info(f"图片已转换为RGB模式: {img.mode}")
-                
-                # 调整图片大小（如果太大）
-                max_size = (1024, 1024)
-                if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
-                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
-                    logger.info(f"图片已调整大小: {img.size}")
-                
-                # 保存为bytes
-                img_byte_arr = io.BytesIO()
-                img.save(img_byte_arr, format=img_format, quality=95)
-                img_byte_arr = img_byte_arr.getvalue()
-                
-                # 转换为base64
-                import base64
-                image_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
-                
-                logger.info(f"图片预处理成功: 格式={img_format}, 大小={len(img_byte_arr)}, 尺寸={img.size}")
-                
-            except Exception as e:
-                logger.error(f"图片预处理失败: {str(e)}", exc_info=True)
-                raise ValueError(f"图片预处理失败: {str(e)}")
-            
-            # 使用视觉模型分析图片
-            try:
-                if not self._vision_model:
-                    self._init_vision_model()
-                
-                # 构建API请求
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "分析这个UI设计图的布局结构、视觉元素和交互设计特征。"
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "请提供以下分析：\n1. 布局结构\n2. UI组件\n3. 视觉风格\n4. 交互模式"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/{img_format.lower()};base64,{image_base64}"
-                                }
-                            }
-                        ]
-                    }
-                ]
-                
-                # 调用API
-                max_retries = 3
-                retry_delay = 1
-                
-                for attempt in range(max_retries):
-                    try:
-                        response = self._vision_model.chat.completions.create(
-                            model="gpt-4o",
-                            messages=messages,
-                            max_tokens=1000,
-                            temperature=0.3
-                        )
-                        
-                        if not response or not response.choices:
-                            raise ValueError("API返回结果无效")
-                        
-                        break
-                        
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"API调用尝试 {attempt + 1} 失败: {str(e)}")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # 指数退避
-                        else:
-                            raise
-                
-                # 获取分析文本
-                analysis_text = response.choices[0].message.content
-                if not analysis_text or len(analysis_text.strip()) < 50:
-                    raise ValueError("分析结果过短或为空")
-                
-                logger.info(f"获取分析结果: 长度={len(analysis_text)}")
-                
-                # 生成嵌入向量
-                embedding = await self._get_embedding_with_cache(analysis_text)
-                
-                # 验证向量
-                if not embedding or len(embedding) != 1536:
-                    raise ValueError(f"嵌入向量维度错误: {len(embedding) if embedding else 0}")
-                
-                # 缓存结果
-                self._image_embedding_cache[cache_key] = embedding
-                await self._async_save_image_cache()
-                
-                logger.info("成功生成并缓存图片嵌入向量")
-                return embedding
-                
-            except Exception as e:
-                logger.error(f"图片分析失败: {str(e)}", exc_info=True)
-                raise
-                
-        except Exception as e:
-            logger.error(f"获取图片嵌入向量失败: {str(e)}", exc_info=True)
-            # 返回零向量作为降级方案
-            return [0.0] * 1536
-    
-    def _load_image_embedding_cache(self):
-        """加载图片嵌入缓存"""
-        try:
-            if self._image_embedding_cache_file.exists():
-                import gzip
-                import json
-                
-                with gzip.open(self._image_embedding_cache_file, 'rt', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                    # 转换缓存数据中的列表为numpy数组
-                    self._image_embedding_cache = {
-                        k: np.array(v, dtype=np.float32) 
-                        for k, v in cache_data.items()
-                    }
-                logger.info(f"已加载图片嵌入缓存: {len(self._image_embedding_cache)}条记录")
+            if doc_ids and len(doc_ids) > 0:
+                logger.info(f"成功添加内容到向量存储，ID: {doc_ids[0]}")
+                return doc_ids[0]
             else:
-                logger.info("图片嵌入缓存文件不存在，将创建新缓存")
-                self._image_embedding_cache = {}
+                logger.warning(f"添加内容到向量存储未返回文档ID")
+                return None
                 
         except Exception as e:
-            logger.error(f"加载图片嵌入缓存失败: {str(e)}", exc_info=True)
-            self._image_embedding_cache = {}
-
-    def _save_image_embedding_cache(self):
-        """保存图片嵌入缓存"""
-        try:
-            import gzip
-            import json
-            
-            # 确保缓存目录存在
-            self._image_embedding_cache_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 转换numpy数组为列表
-            cache_data = {
-                k: v.tolist() if isinstance(v, np.ndarray) else v
-                for k, v in self._image_embedding_cache.items()
-            }
-            
-            # 使用gzip压缩保存
-            with gzip.open(self._image_embedding_cache_file, 'wt', encoding='utf-8') as f:
-                json.dump(cache_data, f)
-                
-            logger.info(f"已保存图片嵌入缓存: {len(self._image_embedding_cache)}条记录")
-            
-        except Exception as e:
-            logger.error(f"保存图片嵌入缓存失败: {str(e)}", exc_info=True)
-
-    async def _async_save_image_cache(self):
-        """异步保存图片嵌入缓存"""
-        try:
-            # 使用线程池执行同步的保存操作
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._save_image_embedding_cache)
-            
-        except Exception as e:
-            logger.error(f"异步保存图片嵌入缓存失败: {str(e)}", exc_info=True)
-        
-    async def get_store_stats(self) -> Dict[str, Any]:
-        """获取向量存储统计信息
-        
-        Returns:
-            Dict[str, Any]: 各存储的统计信息
-        """
-        try:
-            stats = {
-                "context_store": {"count": 0, "available": False},
-                "template_store": {"count": 0, "available": False},
-                "prompts_store": {"count": 0, "available": False},
-                "designs_store": {"count": 0, "available": False}
-            }
-            
-            # 检查各个存储的状态
-            stores = {
-                "context_store": "context_store",
-                "template_store": "template_store",
-                "prompts_store": "prompts_store",
-                "designs_store": "designs_store"
-            }
-            
-            for store_name, attr_name in stores.items():
-                if hasattr(self, attr_name):
-                    store = getattr(self, attr_name)
-                    if store is not None:
-                        # 尝试获取存储的文档数量
-                        try:
-                            if hasattr(store, "index") and store.index is not None:
-                                stats[store_name]["count"] = store.index.ntotal
-                                stats[store_name]["available"] = True
-                            else:
-                                stats[store_name]["available"] = True
-                                stats[store_name]["count"] = 0
-                        except Exception as e:
-                            stats[store_name]["error"] = str(e)
-            
-            return stats
-            
-        except Exception as e:
-            logger.error(f"获取向量存储统计信息失败: {str(e)}")
-            return {}
-        
+            logger.error(f"添加内容到向量存储失败: {str(e)}")
+            if settings.DEBUG:
+                logger.debug("详细错误信息:", exc_info=True)
+            return None 

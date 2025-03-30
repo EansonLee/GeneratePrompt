@@ -1,83 +1,87 @@
-# LangChain Dependencies
-langchain>=0.1.10
-langchain-openai>=0.0.10
-langchain-community>=0.0.30
-langchain-core>=0.1.35
-langgraph>=0.2.80
-openai>=1.15.0
+# Core Dependencies
+fastapi>=0.95.0,<1.0.0
+langchain>=0.0.267
+langchain-openai>=0.0.8
+pydantic>=1.10.7,<2.0.0
+python-dotenv>=1.0.0,<2.0.0
+uvicorn>=0.22.0,<1.0.0
+python-multipart>=0.0.6,<1.0.0
+typing_extensions>=4.5.0,<5.0.0
+starlette>=0.26.1,<1.0.0
+openai>=1.8.0
+langgraph>=0.0.20
+langchain-anthropic>=0.1.1
+jinja2>=3.1.2,<4.0.0
 
-# Vector Store Dependencies
-chromadb>=0.4.24
-faiss-cpu>=1.7.4
+# Vector Database
+faiss-cpu>=1.7.4,<2.0.0
+tiktoken>=0.5.1,<1.0.0
+hnswlib>=0.7.0,<1.0.0
+chromadb>=0.4.13,<1.0.0
 
-# Data Processing Dependencies
-numpy>=1.26.4
-pandas>=2.2.1
-pydantic>=2.6.4
-typing-extensions>=4.10.0
+# Document Processing
+numpy>=1.24.3,<2.0.0
+pandas>=2.0.1,<3.0.0
+pillow>=9.5.0,<10.0.0
+pdfminer.six>=20221105
+pycodestyle>=2.10.0,<3.0.0
 
-# Web Service Dependencies
-fastapi>=0.110.0
-uvicorn>=0.27.1
-python-jose>=3.3.0
-cryptography>=42.0.5
-requests>=2.31.0
-aiohttp>=3.9.3
-starlette>=0.36.3
-websockets>=12.0
+# File Processing
+python-magic>=0.4.27,<1.0.0
+unstructured>=0.8.1,<1.0.0
+unstructured-inference>=0.5.1,<1.0.0
+markdown>=3.4.3,<4.0.0
+beautifulsoup4>=4.12.2,<5.0.0
+pypdf>=3.9.0,<4.0.0
+PyYAML>=6.0,<7.0
+py7zr>=0.20.5,<1.0.0
+patool>=1.12,<2.0.0
 
-# Tools and Utilities
-python-dotenv>=1.0.1
-tiktoken>=0.6.0
-tqdm>=4.66.2
-tenacity>=8.2.3
-jinja2>=3.1.3
+# Image Processing
+opencv-python>=4.7.0.72,<5.0.0
+matplotlib>=3.7.1,<4.0.0
 
-# Testing Dependencies
-pytest>=8.1.1
-pytest-asyncio>=0.23.5
-pytest-cov>=4.1.0
-pytest-mock>=3.12.0
+# Utilities
+tqdm>=4.65.0,<5.0.0
+requests>=2.30.0,<3.0.0
+aiohttp>=3.9.0
+pytz>=2023.3,<2024.0
+pymupdf>=1.22.3,<2.0.0
+cachetools>=5.3.0,<6.0.0
+validators>=0.20.0,<1.0.0
+watchdog>=3.0.0,<4.0.0
+PyPDF2>=3.0.1,<4.0.0
+jsonschema>=4.17.3,<5.0.0
 
-# Code Quality Tools
-mypy>=1.9.0
-black>=24.2.0
-isort>=5.13.2
-flake8>=7.0.0
+# Git Support
+GitPython>=3.1.31,<4.0.0
+packaging>=23.0,<24.0
 
-# File Processing Dependencies
-python-multipart>=0.0.9
-py7zr>=0.20.8
-patool>=2.0.0
-unrar>=0.4
-rarfile>=4.0
+# Testing
+pytest>=7.3.1,<8.0.0
+pytest-asyncio>=0.21.0,<1.0.0
+pytest-cov>=4.1.0,<5.0.0
+pytest-mock>=3.10.0,<4.0.0
+pytest-xdist>=3.2.1,<4.0.0
+pytest-timeout>=2.1.0,<3.0.0
 
-# Text Processing Dependencies
-langchain-text-splitters>=0.0.1
-unstructured>=0.10.30
-markdown>=3.5.2
-PyYAML>=6.0.1
-beautifulsoup4>=4.12.3
-lxml>=5.1.0
+# API Client
+httpx>=0.24.0,<1.0.0
 
-# Additional Tools
-httpx>=0.27.0
-watchfiles>=0.21.0
-orjson>=3.9.15
-ujson>=5.9.0
+# Development
+black>=23.3.0,<24.0.0
+isort>=5.12.0,<6.0.0
+flake8>=6.0.0,<7.0.0
+mypy>=1.3.0,<2.0.0
+pytest-watch>=4.2.0,<5.0.0
+jupyter>=1.0.0,<2.0.0
+ipykernel>=6.23.0,<7.0.0
 
-# Image Processing Dependencies
-Pillow>=10.2.0
-opencv-python>=4.9.0.80
+# Observability
+prometheus-client>=0.16.0,<1.0.0
+opentelemetry-api>=1.17.0,<2.0.0
+opentelemetry-sdk>=1.17.0,<2.0.0
 
-# Cache and Performance
-redis>=5.0.1
-cachetools>=5.3.2
-
-# Error Handling and Logging
-sentry-sdk>=1.40.0
-loguru>=0.7.2
-
-# Additional Dependencies
-# unittest-mock>=1.3.0  # 用于测试，在vector_store.py中使用
-# unittest-mock>=1.3.0
+# File Async Reading
+aiofiles>=23.2.1
+aiosignal>=1.2.0

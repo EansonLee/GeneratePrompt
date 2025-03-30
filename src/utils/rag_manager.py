@@ -27,18 +27,20 @@ class RAGManager:
             self.vector_store = vector_store or VectorStore()
             
             # 检查向量存储是否已初始化
-            if not self.vector_store.is_initialized():
-                logger.warning("向量存储未完全初始化，RAG功能可能受限")
+            if not hasattr(self.vector_store, 'stores') or not self.vector_store.stores:
+                logger.warning("向量存储未完全初始化，RAG功能将使用降级模式")
                 
-                # 如果使用mock模式，创建mock存储
-                if getattr(self.vector_store, 'use_mock', False):
-                    if not hasattr(self.vector_store, 'context_store') or self.vector_store.context_store is None:
-                        self.vector_store.context_store = Mock()
-                        logger.info("创建Mock context_store")
-            
-            # 验证必要的存储是否存在
-            if not hasattr(self.vector_store, 'context_store'):
-                raise ValueError("向量存储缺少context_store")
+                # 创建Mock contexts如果不存在
+                if not hasattr(self.vector_store, 'contexts') or self.vector_store.contexts is None:
+                    # 创建Mock对象
+                    mock_contexts = AsyncMock()
+                    mock_contexts.as_retriever = Mock(return_value=AsyncMock())
+                    mock_contexts.as_retriever().aget_relevant_documents = AsyncMock(return_value=[])
+                    mock_contexts.similarity_search_with_score = Mock(return_value=[(Document(page_content="", metadata={}), 0.0)])
+                    
+                    # 设置到vector_store
+                    self.vector_store.contexts = mock_contexts
+                    logger.info("已创建Mock contexts，以支持基本操作")
             
             # 初始化文本分割器
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -47,15 +49,23 @@ class RAGManager:
                 separators=settings.VECTOR_STORE_CONFIG["separators"]
             )
             
-            # 初始化检索器，如果context_store不可用则使用mock
-            if hasattr(self.vector_store, 'context_store') and self.vector_store.context_store is not None:
-                self.retriever = self.vector_store.context_store.as_retriever(
-                    search_kwargs={"k": 5}
-                )
-                logger.info("使用实际的context_store初始化检索器")
+            # 初始化检索器
+            if hasattr(self.vector_store, 'contexts') and self.vector_store.contexts is not None:
+                try:
+                    self.retriever = self.vector_store.contexts.as_retriever(
+                        search_kwargs={"k": 5}
+                    )
+                    logger.info("已初始化检索器")
+                except Exception as e:
+                    logger.error(f"初始化检索器失败: {str(e)}")
+                    # 创建mock检索器
+                    mock_retriever = AsyncMock()
+                    mock_retriever.aget_relevant_documents = AsyncMock(return_value=[])
+                    self.retriever = mock_retriever
+                    logger.warning("使用Mock检索器，RAG功能将受限")
             else:
                 # 创建mock检索器
-                mock_retriever = Mock()
+                mock_retriever = AsyncMock()
                 mock_retriever.aget_relevant_documents = AsyncMock(return_value=[])
                 self.retriever = mock_retriever
                 logger.warning("使用Mock检索器，RAG功能将受限")
@@ -64,7 +74,14 @@ class RAGManager:
             
         except Exception as e:
             logger.error(f"RAG管理器初始化失败: {str(e)}")
-            raise
+            if settings.DEBUG:
+                logger.debug("详细错误信息:", exc_info=True)
+            # 降级：创建基本的Mock组件
+            self.vector_store = AsyncMock()
+            self.retriever = AsyncMock()
+            self.retriever.aget_relevant_documents = AsyncMock(return_value=[])
+            self.text_splitter = RecursiveCharacterTextSplitter()
+            logger.warning("RAG管理器降级为Mock模式，功能受限")
             
     async def enhance_prompt(self, prompt: str) -> Dict[str, Any]:
         """使用RAG增强提示词
@@ -146,7 +163,7 @@ class RAGManager:
         relevance = []
         
         for doc in docs:
-            score = self.vector_store.context_store.similarity_search_with_score(
+            score = self.vector_store.contexts.similarity_search_with_score(
                 query=prompt,
                 k=1,
                 filter={"id": doc.metadata.get("id")}

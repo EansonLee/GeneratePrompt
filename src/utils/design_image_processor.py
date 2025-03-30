@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import uuid
 from datetime import datetime
@@ -144,6 +144,56 @@ class DesignImageProcessor:
             str: 图片哈希值
         """
         return hashlib.sha256(image_data).hexdigest()
+    
+    def _get_design_image_path(self, design_image_id: str) -> str:
+        """根据设计图ID获取图片文件路径
+        
+        Args:
+            design_image_id: 设计图ID
+            
+        Returns:
+            str: 图片文件路径
+        """
+        # 确保上传目录存在
+        upload_dir = Path(self.upload_dir)
+        if not upload_dir.exists():
+            logger.warning(f"上传目录不存在，尝试创建: {upload_dir}")
+            try:
+                upload_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.error(f"创建上传目录失败: {str(e)}")
+                
+        logger.info(f"查找设计图: ID={design_image_id}, 目录={upload_dir}")
+                
+        # 查找支持的图片扩展名
+        supported_exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+        
+        # 列出目录内容进行调试
+        try:
+            files = list(upload_dir.glob('*'))
+            logger.info(f"上传目录内容 ({len(files)}个文件): {', '.join(f.name for f in files[:10])}")
+            
+            # 直接检查文件名前缀匹配
+            matching_files = [f for f in files if f.name.startswith(design_image_id)]
+            if matching_files:
+                logger.info(f"找到匹配的文件: {matching_files[0]}")
+                return str(matching_files[0])
+        except Exception as e:
+            logger.error(f"列出目录内容失败: {str(e)}")
+        
+        # 常规检查
+        for ext in supported_exts:
+            # 尝试使用不同的扩展名构建文件路径
+            file_path = os.path.join(self.upload_dir, f"{design_image_id}{ext}")
+            logger.debug(f"检查文件路径: {file_path}")
+            if os.path.exists(file_path):
+                logger.info(f"找到设计图文件: {file_path}")
+                return file_path
+                
+        # 如果找不到文件，返回默认路径（可能不存在）
+        default_path = os.path.join(self.upload_dir, f"{design_image_id}.png")
+        logger.warning(f"未找到设计图文件: {design_image_id}，使用默认路径: {default_path}。上传目录: {self.upload_dir}")
+        return default_path
     
     def _prune_cache_if_needed(self, max_entries: int = 100):
         """如果缓存大小超过限制，清理最旧的缓存条目
@@ -309,6 +359,7 @@ class DesignImageProcessor:
                 logger.info(f"已将分析结果添加到缓存: {image_hash}")
             
             # 8. 将分析结果添加到向量存储
+            vector_store_success = True
             if self.vector_store:
                 try:
                     metadata = {
@@ -327,15 +378,23 @@ class DesignImageProcessor:
                         metadata["format"] = img.format
                     
                     # 添加到向量存储
-                    await self.vector_store.add_content(
+                    doc_id = await self.vector_store.add_content(
                         content=analysis_text,
                         content_type="design_analysis",
                         metadata=metadata
                     )
-                    logger.info(f"已将设计图分析添加到向量存储: {image_id}")
+                    
+                    if doc_id:
+                        logger.info(f"已将设计图分析添加到向量存储: {image_id}")
+                    else:
+                        logger.warning(f"向量存储未返回文档ID，设计图分析可能未被保存: {image_id}")
+                        vector_store_success = False
                 except Exception as e:
                     logger.error(f"添加到向量存储失败: {str(e)}")
-                    raise
+                    if settings.DEBUG:
+                        logger.error("详细错误信息:", exc_info=True)
+                    vector_store_success = False
+                    # 不抛出异常，继续处理
             
             # 9. 构建结果
             result = {
@@ -346,6 +405,7 @@ class DesignImageProcessor:
                 "analysis": analysis_text,
                 "image_hash": image_hash,
                 "cache_hit": cache_hit,
+                "vector_store_success": vector_store_success,
                 "processing_time": 0  # 可以在需要时添加处理时间计算
             }
             
@@ -475,24 +535,50 @@ class DesignImageProcessor:
             full_metadata: 完整元数据
             file_id: 文件ID
         """
+        added_sections = 0
+        failed_sections = 0
+        
         try:
             # 为每个部分创建单独的向量
             for section_type, section_text in analysis_sections.items():
-                section_metadata = {
-                    **full_metadata,
-                    "section_type": section_type
-                }
+                try:
+                    section_metadata = {
+                        **full_metadata,
+                        "section_type": section_type
+                    }
+                    
+                    doc_ids = await self.vector_store.add_texts(
+                        texts=[section_text],
+                        metadatas=[section_metadata],
+                        ids=[f"{file_id}_{section_type}"]
+                    )
+                    
+                    if doc_ids and len(doc_ids) > 0:
+                        logger.info(f"已添加{section_type}部分到向量存储")
+                        added_sections += 1
+                    else:
+                        logger.warning(f"未能添加{section_type}部分到向量存储，未返回ID")
+                        failed_sections += 1
+                        
+                except Exception as section_error:
+                    logger.error(f"添加{section_type}部分到向量存储失败: {str(section_error)}")
+                    failed_sections += 1
+                    # 继续处理其他部分，不中断整个流程
+                    
+            # 记录添加结果统计
+            if added_sections > 0:
+                if failed_sections > 0:
+                    logger.info(f"部分添加成功: {added_sections}个部分添加成功，{failed_sections}个部分失败")
+                else:
+                    logger.info(f"全部添加成功: {added_sections}个部分")
+            else:
+                logger.warning(f"所有{len(analysis_sections)}个部分添加失败")
                 
-                await self.vector_store.add_texts(
-                    texts=[section_text],
-                    metadatas=[section_metadata],
-                    ids=[f"{file_id}_{section_type}"]
-                )
-                logger.info(f"已添加{section_type}部分到向量存储")
         except Exception as e:
-            logger.error(f"添加到向量存储失败: {str(e)}")
-            import traceback
-            logger.error(f"详细错误信息: {traceback.format_exc()}")
+            logger.error(f"添加到向量存储过程中发生错误: {str(e)}")
+            if settings.DEBUG:
+                import traceback
+                logger.error(f"详细错误信息: {traceback.format_exc()}")
             # 继续执行，不要因为向量存储失败而中断整个流程
     
     def _build_analysis_prompt(self, tech_stack: str) -> str:
@@ -715,13 +801,47 @@ class DesignImageProcessor:
             Dict[str, Any]: 分析结果
         """
         try:
+            # 检查文件是否存在
+            if not os.path.exists(image_path):
+                logger.error(f"设计图文件不存在: {image_path}")
+                return {
+                    "status": "error",
+                    "message": f"设计图文件不存在: {image_path}",
+                    "elements": [],
+                    "colors": [],
+                    "fonts": [],
+                    "layout": {},
+                    "summary": "无法分析设计图，文件不存在"
+                }
+            
             # 读取图片
-            with open(image_path, "rb") as f:
-                image_data = f.read()
+            try:
+                with open(image_path, "rb") as f:
+                    image_data = f.read()
+                logger.info(f"成功读取设计图文件: {image_path}, 大小: {len(image_data)} 字节")
+            except Exception as e:
+                logger.error(f"读取设计图文件失败: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"读取设计图文件失败: {str(e)}",
+                    "summary": "无法读取设计图文件"
+                }
+            
+            # 尝试验证图片格式
+            try:
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(image_data))
+                logger.info(f"图片格式: {img.format}, 尺寸: {img.size}, 模式: {img.mode}")
+            except Exception as e:
+                logger.error(f"验证图片格式失败: {str(e)}")
+                # 继续处理，不中断流程
             
             # 获取文件名和格式
             filename = os.path.basename(image_path)
             img_format = os.path.splitext(filename)[1][1:].lower()
+            if not img_format:
+                img_format = "png"  # 默认格式
             
             # 构建分析提示
             analysis_prompt = f"""
@@ -739,12 +859,30 @@ class DesignImageProcessor:
             
             # 使用视觉模型分析图片
             try:
+                # 检查视觉模型是否已初始化
+                if not self.vision_model:
+                    logger.error(f"视觉模型未初始化")
+                    return {
+                        "status": "error",
+                        "message": "视觉模型未初始化",
+                        "summary": "系统错误：视觉模型未初始化，无法分析设计图"
+                    }
+                
                 # 记录使用的视觉模型信息
                 vision_model = settings.VISION_MODEL
                 vision_temp = settings.VISION_MODEL_CONFIG["temperature"]
                 vision_max_tokens = settings.VISION_MODEL_CONFIG["max_tokens"]
                 logger.info(f"使用视觉模型 {vision_model} 分析设计图: {filename}")
                 
+                # 创建图像的base64编码
+                try:
+                    image_base64 = base64.b64encode(image_data).decode('utf-8')
+                    logger.info(f"成功创建图像的base64编码: {len(image_base64)} 字符")
+                except Exception as e:
+                    logger.error(f"创建图像的base64编码失败: {str(e)}")
+                    raise
+                
+                # API调用
                 response = self.vision_model.chat.completions.create(
                     model=vision_model,
                     messages=[
@@ -766,7 +904,7 @@ class DesignImageProcessor:
                                 {
                                     "type": "image_url",
                                     "image_url": {
-                                        "url": f"data:image/{img_format};base64,{base64.b64encode(image_data).decode('utf-8')}"
+                                        "url": f"data:image/{img_format};base64,{image_base64}"
                                     }
                                 }
                             ]
@@ -782,18 +920,667 @@ class DesignImageProcessor:
                 
                 # 构建结果
                 result = {
+                    "status": "success",
                     "filename": filename,
                     "tech_stack": tech_stack,
                     "analysis": analysis_result,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "image_path": image_path,
+                    "elements": [],
+                    "colors": [],
+                    "fonts": [],
+                    "layout": {},
+                    "summary": "分析成功"
                 }
+                
+                # 尝试解析分析文本，提取结构化信息
+                try:
+                    self._extract_structured_info(result, analysis_result)
+                except Exception as e:
+                    logger.error(f"提取结构化信息失败: {str(e)}")
+                    # 不影响主流程
                 
                 return result
                 
             except Exception as e:
                 logger.error(f"视觉模型 {settings.VISION_MODEL} 分析失败: {str(e)}", exc_info=True)
-                raise ValueError(f"视觉模型分析失败: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"视觉模型分析失败: {str(e)}",
+                    "summary": "视觉模型分析失败，无法完成设计图分析"
+                }
                 
         except Exception as e:
             logger.error(f"分析设计图失败: {str(e)}", exc_info=True)
-            raise 
+            return {
+                "status": "error",
+                "message": f"分析设计图失败: {str(e)}",
+                "summary": "分析过程中发生错误"
+            }
+    
+    def _extract_structured_info(self, result: Dict[str, Any], analysis_text: str) -> None:
+        """从分析文本中提取结构化信息
+        
+        Args:
+            result: 要更新的结果字典
+            analysis_text: 分析文本
+        """
+        # 提取摘要
+        summary_match = re.search(r'整体(描述|分析|设计|总览|概述)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d|\Z)', analysis_text, re.DOTALL)
+        if summary_match:
+            result["summary"] = summary_match.group(2).strip()
+        
+        # 提取UI元素
+        elements = []
+        elements_section = re.search(r'(UI组件|界面元素|主要组件)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d+\.|\Z)', analysis_text, re.DOTALL)
+        if elements_section:
+            elements_text = elements_section.group(2)
+            element_matches = re.findall(r'[-*]?\s*(\w+)[:：]\s*(.+?)(?=\n[-*]|\Z)', elements_text, re.DOTALL)
+            for name, desc in element_matches:
+                elements.append({
+                    "name": name.strip(),
+                    "type": "UI组件",
+                    "description": desc.strip()
+                })
+        result["elements"] = elements
+        
+        # 提取颜色
+        colors = []
+        colors_section = re.search(r'(颜色方案|配色方案|色彩)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d+\.|\Z)', analysis_text, re.DOTALL)
+        if colors_section:
+            colors_text = colors_section.group(2)
+            color_matches = re.findall(r'[-*]?\s*([^:：\n]+)[:：]\s*(.+?)(?=\n[-*]|\Z)', colors_text, re.DOTALL)
+            for name, desc in color_matches:
+                # 尝试提取颜色代码
+                hex_match = re.search(r'(#[0-9A-Fa-f]{6})', desc)
+                hex_code = hex_match.group(1) if hex_match else "#000000"
+                colors.append({
+                    "name": name.strip(),
+                    "hex": hex_code,
+                    "description": desc.strip()
+                })
+        result["colors"] = colors
+        
+        # 提取布局信息
+        layout = {}
+        layout_section = re.search(r'(布局结构|布局|结构)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d+\.|\Z)', analysis_text, re.DOTALL)
+        if layout_section:
+            layout["structure"] = layout_section.group(2).strip()
+        
+        result["layout"] = layout
+
+    async def _analyze_image_for_tech_stack(
+        self, 
+        image_path: str, 
+        tech_stack: str
+    ) -> Dict[str, Any]:
+        """根据技术栈分析设计图
+        
+        Args:
+            image_path: 图片路径
+            tech_stack: 技术栈
+            
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        try:
+            # 检查技术栈是否受支持
+            supported_tech_stacks = settings.DESIGN_PROMPT_CONFIG.get("supported_tech_stacks", [])
+            if tech_stack not in supported_tech_stacks:
+                logger.warning(f"不支持的技术栈: {tech_stack}")
+                return {
+                    "status": "error",
+                    "message": f"不支持的技术栈: {tech_stack}"
+                }
+            
+            # 获取技术栈特定配置
+            tech_config = settings.DESIGN_PROMPT_CONFIG.get("tech_stack_config", {}).get(tech_stack, {})
+            
+            # 拼接技术栈特定分析提示词
+            prompt = self._build_tech_stack_analysis_prompt(tech_stack, tech_config)
+            
+            # 使用视觉模型分析
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+                result = await self._analyze_with_vision_model(image_data, prompt)
+            
+            return {
+                "status": "success",
+                "tech_stack": tech_stack,
+                "analysis": result,
+                "tech_config": tech_config
+            }
+        except Exception as e:
+            logger.error(f"技术栈特定分析失败: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"技术栈特定分析失败: {str(e)}"
+            }
+    
+    def _build_tech_stack_analysis_prompt(self, tech_stack: str, tech_config: Dict[str, Any]) -> str:
+        """构建技术栈特定分析提示词
+        
+        Args:
+            tech_stack: 技术栈
+            tech_config: 技术栈配置
+            
+        Returns:
+            str: 分析提示词
+        """
+        # 基础提示词
+        base_prompt = f"""
+        请作为UI/UX专家和{tech_stack}开发者，详细分析这张设计图。
+        
+        请提供以下信息：
+        1. 设计图总体描述
+        2. 主要UI元素和布局结构
+        3. 颜色方案和排版特点
+        4. 交互元素和可能的用户流程
+        5. 适合在{tech_stack}中实现的组件列表
+        """
+        
+        # 添加技术栈特定提示
+        if tech_stack == "Android":
+            frameworks = tech_config.get("frameworks", [])
+            prompt = base_prompt + f"""
+            6. 如何使用{", ".join(frameworks)}实现此界面
+            7. 推荐的Android特定组件和库：
+               - 布局类型（ConstraintLayout/LinearLayout等或Compose布局）
+               - 列表实现（RecyclerView或LazyColumn等）
+               - 导航组件
+               - 动画实现方式
+            8. 可能的屏幕适配考虑点
+            9. 深色模式适配建议
+            
+            请重点关注Material Design组件的应用，以及Android特有的UI模式和交互。
+            """
+        elif tech_stack == "iOS":
+            frameworks = tech_config.get("frameworks", [])
+            prompt = base_prompt + f"""
+            6. 如何使用{", ".join(frameworks)}实现此界面
+            7. 推荐的iOS特定组件和库：
+               - 视图结构（UIKit视图层次或SwiftUI视图）
+               - 列表实现（UITableView/UICollectionView或List/LazyVGrid等）
+               - 导航控制器
+               - 动画实现方式
+            8. 可能的屏幕适配考虑点
+            9. Dark Mode适配建议
+            
+            请重点关注Human Interface Guidelines，以及iOS特有的UI模式和交互。
+            """
+        elif tech_stack == "Flutter":
+            prompt = base_prompt + """
+            6. 如何使用Flutter Widget实现此界面
+            7. 推荐的Flutter特定组件：
+               - 布局Widget（Column/Row/Stack等）
+               - 列表Widget（ListView/GridView等）
+               - 导航方案
+               - 动画实现方式
+            8. 跨平台一致性考虑点
+            9. 主题适配建议
+            
+            请重点关注Flutter Material/Cupertino组件的应用，以及Flutter特有的UI构建方式。
+            """
+        elif tech_stack == "React":
+            prompt = base_prompt + """
+            6. 如何使用React组件实现此界面
+            7. 推荐的React UI库和组件：
+               - 布局组件
+               - 列表/表格组件
+               - 导航/路由方案
+               - 动画实现方式
+            8. 响应式设计考虑点
+            9. 主题切换实现建议
+            
+            请重点关注组件拆分策略，以及React生态中常用UI库的应用。
+            """
+        elif tech_stack == "Vue":
+            prompt = base_prompt + """
+            6. 如何使用Vue组件实现此界面
+            7. 推荐的Vue UI库和组件：
+               - 布局组件
+               - 列表/表格组件
+               - 导航/路由方案
+               - 动画实现方式
+            8. 响应式设计考虑点
+            9. 主题切换实现建议
+            
+            请重点关注Vue组件设计，以及Vue生态中常用UI库的应用。
+            """
+        else:
+            # 默认通用提示
+            prompt = base_prompt
+        
+        return prompt
+    
+    async def _analyze_with_vision_model(self, image_data: bytes, prompt: str) -> str:
+        """使用视觉模型分析图片
+        
+        Args:
+            image_data: 图片数据
+            prompt: 分析提示词
+            
+        Returns:
+            str: 分析结果
+        """
+        try:
+            # 使用OpenAI视觉模型
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+            
+            response = await asyncio.to_thread(
+                self.vision_model.chat.completions.create,
+                model=settings.VISION_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是一位专业的UI/UX分析师，擅长分析设计图并提供技术实现建议。"
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                temperature=settings.VISION_MODEL_CONFIG["temperature"],
+                max_tokens=settings.VISION_MODEL_CONFIG["max_tokens"]
+            )
+            
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"视觉模型分析失败: {str(e)}")
+            raise
+            
+    async def _extract_color_scheme(self, image_path: str) -> Dict[str, Any]:
+        """提取设计图的配色方案
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            Dict[str, Any]: 配色方案
+        """
+        try:
+            img = Image.open(image_path)
+            img = img.convert('RGBA')
+            img = img.resize((150, 150))  # 缩小图片以加快处理速度
+            
+            # 将图片转换为numpy数组
+            pixels = np.array(img)
+            
+            # 排除透明背景
+            pixels = pixels[pixels[:, :, 3] > 0]
+            
+            # 如果没有非透明像素，返回空结果
+            if len(pixels) == 0:
+                return {
+                    "primary_colors": [],
+                    "color_palette": []
+                }
+            
+            # 使用K-means聚类提取主要颜色
+            from sklearn.cluster import KMeans
+            
+            # 保留RGB通道，忽略Alpha通道
+            pixels_rgb = pixels[:, :3]
+            
+            # 使用K-means提取6种主要颜色
+            kmeans = KMeans(n_clusters=6, random_state=0)
+            kmeans.fit(pixels_rgb)
+            colors = kmeans.cluster_centers_
+            
+            # 计算每个颜色的重要性（所占像素比例）
+            labels = kmeans.labels_
+            counts = np.bincount(labels)
+            percentage = counts / len(labels)
+            
+            # 按重要性排序颜色
+            sorted_indices = percentage.argsort()[::-1]
+            sorted_colors = colors[sorted_indices]
+            sorted_percentages = percentage[sorted_indices]
+            
+            # 将颜色转换为十六进制格式
+            hex_colors = []
+            for color in sorted_colors:
+                r, g, b = [int(c) for c in color]
+                hex_color = f"#{r:02x}{g:02x}{b:02x}"
+                hex_colors.append(hex_color)
+            
+            # 识别主要和次要颜色
+            primary_colors = []
+            for i, (hex_color, percent) in enumerate(zip(hex_colors[:3], sorted_percentages[:3])):
+                primary_colors.append({
+                    "color": hex_color,
+                    "percentage": float(percent),
+                    "role": "primary" if i == 0 else "secondary" if i == 1 else "accent"
+                })
+            
+            return {
+                "primary_colors": primary_colors,
+                "color_palette": hex_colors
+            }
+        except Exception as e:
+            logger.error(f"提取配色方案失败: {str(e)}")
+            return {
+                "primary_colors": [],
+                "color_palette": []
+            }
+    
+    async def _extract_typography(self, image_path: str) -> Dict[str, Any]:
+        """提取设计图的排版信息
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            Dict[str, Any]: 排版信息
+        """
+        # 使用视觉模型提取排版信息的提示词
+        prompt = """
+        请分析此设计图的排版系统，提供以下信息：
+        1. 字体系列：识别主要使用的字体类型（sans-serif、serif、monospace等）
+        2. 字体大小层级：识别不同级别文本的大小（如标题、副标题、正文等）
+        3. 字重使用：粗体、常规、细体的使用模式
+        4. 行高和段落间距
+        5. 文本对齐方式
+        
+        请以结构化方式呈现结果，不要猜测具体字体名称，只需提供字体类别和特征。
+        """
+        
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+                result = await self._analyze_with_vision_model(image_data, prompt)
+            
+            # 尝试提取结构化信息
+            typography = {
+                "font_family": self._extract_font_family(result),
+                "text_styles": self._extract_text_styles(result),
+                "raw_analysis": result
+            }
+            
+            return typography
+        except Exception as e:
+            logger.error(f"提取排版信息失败: {str(e)}")
+            return {
+                "font_family": "未知",
+                "text_styles": [],
+                "raw_analysis": "分析失败"
+            }
+    
+    def _extract_font_family(self, text: str) -> str:
+        """从分析文本中提取字体家族
+        
+        Args:
+            text: 分析文本
+            
+        Returns:
+            str: 字体家族
+        """
+        # 使用正则表达式查找字体家族相关描述
+        patterns = [
+            r"字体系列[：:]\s*([^\n\.。]+)",
+            r"主要(?:使用的)?字体(?:类型)?[：:]\s*([^\n\.。]+)",
+            r"字体[：:]\s*([^\n\.。]+)"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).strip()
+        
+        return "Sans-serif"  # 默认值
+    
+    def _extract_text_styles(self, text: str) -> List[Dict[str, str]]:
+        """从分析文本中提取文本样式
+        
+        Args:
+            text: 分析文本
+            
+        Returns:
+            List[Dict[str, str]]: 文本样式列表
+        """
+        styles = []
+        
+        # 查找字体大小层级描述
+        size_section = re.search(r"字体大小[^：:]*[：:]\s*([^\n]+(?:\n[^1-5\n][^\n]*)*)", text)
+        if size_section:
+            size_text = size_section.group(1)
+            # 查找标题、副标题、正文等
+            for style_type in ["标题", "副标题", "正文", "小标题", "说明文字", "按钮文字"]:
+                pattern = rf"{style_type}[：:]?\s*([^\n\.。,，;；]+)"
+                match = re.search(pattern, size_text)
+                if match:
+                    size_desc = match.group(1).strip()
+                    styles.append({
+                        "type": style_type,
+                        "size": size_desc
+                    })
+        
+        # 如果没有找到任何样式，添加默认样式
+        if not styles:
+            styles = [
+                {"type": "标题", "size": "大"},
+                {"type": "副标题", "size": "中"},
+                {"type": "正文", "size": "小"}
+            ]
+        
+        return styles
+    
+    async def _identify_ui_components(self, image_path: str, tech_stack: str) -> List[Dict[str, Any]]:
+        """识别设计图中的UI组件
+        
+        Args:
+            image_path: 图片路径
+            tech_stack: 技术栈
+            
+        Returns:
+            List[Dict[str, Any]]: UI组件列表
+        """
+        # 根据技术栈构建UI组件识别提示词
+        tech_config = settings.DESIGN_PROMPT_CONFIG.get("tech_stack_config", {}).get(tech_stack, {})
+        ui_components = tech_config.get("ui_components", [])
+        
+        prompt = f"""
+        请识别此设计图中的UI组件，并匹配到{tech_stack}技术栈中的标准组件。
+        
+        特别关注以下{tech_stack}组件类型：
+        {', '.join(ui_components)}
+        
+        对于每个识别到的组件，请提供：
+        1. 组件名称
+        2. 对应的{tech_stack}标准组件
+        3. 组件在界面中的位置和作用
+        4. 可能的属性和状态
+        
+        请以列表形式返回结果，确保信息清晰、准确。
+        """
+        
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+                result = await self._analyze_with_vision_model(image_data, prompt)
+            
+            # 提取组件信息
+            components = self._parse_components_from_text(result, tech_stack)
+            
+            return components
+        except Exception as e:
+            logger.error(f"识别UI组件失败: {str(e)}")
+            return []
+    
+    def _parse_components_from_text(self, text: str, tech_stack: str) -> List[Dict[str, Any]]:
+        """从分析文本中解析UI组件
+        
+        Args:
+            text: 分析文本
+            tech_stack: 技术栈
+            
+        Returns:
+            List[Dict[str, Any]]: UI组件列表
+        """
+        components = []
+        
+        # 尝试提取组件列表
+        # 匹配数字列表项或带点的列表项后跟组件名称
+        component_patterns = [
+            r'\d+\.\s*([^：:]+)[：:]\s*([^\n]+)',
+            r'[-*]\s*([^：:]+)[：:]\s*([^\n]+)',
+            r'([A-Za-z\u4e00-\u9fa5]+(?:\s+[A-Za-z\u4e00-\u9fa5]+)*)\s*组件[：:]\s*([^\n]+)'
+        ]
+        
+        for pattern in component_patterns:
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                if len(match.groups()) >= 2:
+                    name = match.group(1).strip()
+                    description = match.group(2).strip()
+                    
+                    # 避免添加已存在的组件
+                    if not any(c.get("name") == name for c in components):
+                        components.append({
+                            "name": name,
+                            "tech_stack": tech_stack,
+                            "description": description,
+                            "source": "vision_analysis"
+                        })
+        
+        # 如果没有找到任何组件，尝试从整个文本中提取信息
+        if not components:
+            # 尝试查找常见的UI组件名称
+            ui_component_names = self._get_common_ui_components(tech_stack)
+            for component_name in ui_component_names:
+                if component_name.lower() in text.lower():
+                    # 尝试提取关于这个组件的一句描述
+                    pattern = rf'{component_name}[^。.。\n]*[。.。]'
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    description = match.group(0) if match else f"{component_name}组件"
+                    
+                    components.append({
+                        "name": component_name,
+                        "tech_stack": tech_stack,
+                        "description": description,
+                        "source": "vision_analysis"
+                    })
+        
+        return components
+    
+    def _get_common_ui_components(self, tech_stack: str) -> List[str]:
+        """获取常见UI组件列表
+        
+        Args:
+            tech_stack: 技术栈
+            
+        Returns:
+            List[str]: UI组件名称列表
+        """
+        # 从配置中获取UI组件
+        tech_config = settings.DESIGN_PROMPT_CONFIG.get("tech_stack_config", {}).get(tech_stack, {})
+        return tech_config.get("ui_components", [])
+    
+    async def _extract_spacing(self, image_path: str) -> Dict[str, Any]:
+        """提取设计图的间距信息
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            Dict[str, Any]: 间距信息
+        """
+        prompt = """
+        请分析此设计图的间距和对齐系统，提供以下信息：
+        1. 水平间距模式
+        2. 垂直间距模式
+        3. 内边距(padding)使用模式
+        4. 外边距(margin)使用模式
+        5. 对齐方式
+        
+        请注意识别是否有一致的间距模式，例如8dp网格系统或其他间距系统。
+        """
+        
+        try:
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+                result = await self._analyze_with_vision_model(image_data, prompt)
+            
+            # 提取关键信息
+            spacing = {
+                "horizontal_spacing": self._extract_spacing_info(result, "水平间距"),
+                "vertical_spacing": self._extract_spacing_info(result, "垂直间距"),
+                "padding": self._extract_spacing_info(result, "内边距"),
+                "margin": self._extract_spacing_info(result, "外边距"),
+                "alignment": self._extract_spacing_info(result, "对齐方式"),
+                "raw_analysis": result
+            }
+            
+            return spacing
+        except Exception as e:
+            logger.error(f"提取间距信息失败: {str(e)}")
+            return {
+                "horizontal_spacing": "未知",
+                "vertical_spacing": "未知",
+                "padding": "未知",
+                "margin": "未知",
+                "alignment": "未知",
+                "raw_analysis": "分析失败"
+            }
+    
+    def _extract_spacing_info(self, text: str, type_name: str) -> str:
+        """从分析文本中提取指定类型的间距信息
+        
+        Args:
+            text: 分析文本
+            type_name: 间距类型名称
+            
+        Returns:
+            str: 间距信息
+        """
+        pattern = rf'{type_name}[^：:]*[：:]\s*([^\n\.。]+)'
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).strip()
+        return "一致性间距"  # 默认值
+    
+    async def enhance_design_analysis(
+        self, 
+        image_path: str, 
+        tech_stack: str
+    ) -> Dict[str, Any]:
+        """增强设计图分析
+        
+        Args:
+            image_path: 图片路径
+            tech_stack: 技术栈
+            
+        Returns:
+            Dict[str, Any]: 增强分析结果
+        """
+        # 获取基础分析结果
+        base_analysis = await self.analyze_design(image_path)
+        
+        # 并行执行多个分析任务
+        tech_stack_analysis, color_scheme, typography, spacing, ui_components = await asyncio.gather(
+            self._analyze_image_for_tech_stack(image_path, tech_stack),
+            self._extract_color_scheme(image_path),
+            self._extract_typography(image_path),
+            self._extract_spacing(image_path),
+            self._identify_ui_components(image_path, tech_stack)
+        )
+        
+        # 整合所有分析结果
+        enhanced_analysis = {
+            **base_analysis,
+            "tech_stack_analysis": tech_stack_analysis,
+            "color_scheme": color_scheme,
+            "typography": typography,
+            "spacing": spacing,
+            "ui_components": ui_components
+        }
+        
+        return enhanced_analysis 

@@ -1,7 +1,15 @@
 """配置文件"""
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
+import logging
+from dotenv import load_dotenv
+
+# 加载.env文件
+load_dotenv()
+
+# 设置日志记录器
+logger = logging.getLogger(__name__)
 
 # 基础路径配置
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -175,7 +183,45 @@ class Config:
             "temperature": safe_float(os.getenv("DESIGN_PROMPT_TEMPERATURE", "0.5"), 0.5),
             "max_tokens": safe_int(os.getenv("DESIGN_PROMPT_MAX_TOKENS", "3000"), 3000),
             # 支持的技术栈
-            "supported_tech_stacks": ["Android", "iOS", "Flutter"],
+            "supported_tech_stacks": ["Android", "iOS", "Flutter", "React", "Vue"],
+            # 技术栈特定配置
+            "tech_stack_config": {
+                "Android": {
+                    "frameworks": ["Jetpack Compose", "View System", "ViewBinding", "DataBinding"],
+                    "architectures": ["MVVM", "MVI", "Clean Architecture"],
+                    "common_libraries": ["Retrofit", "OkHttp", "Room", "Glide", "Coil", "Hilt", "Koin"],
+                    "ui_components": ["RecyclerView", "ViewPager2", "BottomNavigationView", "Toolbar"],
+                    "default_architecture": "MVVM"
+                },
+                "iOS": {
+                    "frameworks": ["SwiftUI", "UIKit"],
+                    "architectures": ["MVVM", "MVC", "VIPER", "Clean Swift"],
+                    "common_libraries": ["Alamofire", "Kingfisher", "SnapKit", "RxSwift", "Combine", "SwiftPM"],
+                    "ui_components": ["UITableView", "UICollectionView", "UINavigationController", "UITabBarController"],
+                    "default_architecture": "MVVM" 
+                },
+                "Flutter": {
+                    "frameworks": ["Flutter SDK", "Flutter Web"],
+                    "architectures": ["BLoC", "Provider", "Riverpod", "GetX"],
+                    "common_libraries": ["dio", "http", "flutter_bloc", "provider", "get_it", "shared_preferences"],
+                    "ui_components": ["ListView", "GridView", "TabBar", "BottomNavigationBar"],
+                    "default_architecture": "BLoC"
+                },
+                "React": {
+                    "frameworks": ["React", "Next.js", "Remix", "Gatsby"],
+                    "architectures": ["Atomic Design", "Feature First", "Container/Component"],
+                    "common_libraries": ["Redux", "React Query", "Emotion", "Styled Components", "Tailwind CSS"],
+                    "ui_components": ["Material-UI", "Ant Design", "Chakra UI", "Radix UI"],
+                    "default_architecture": "Feature First"
+                },
+                "Vue": {
+                    "frameworks": ["Vue.js", "Nuxt.js", "Quasar"],
+                    "architectures": ["Vuex Store", "Pinia", "Composition API"],
+                    "common_libraries": ["Vuex", "Vue Router", "Pinia", "Axios", "Vuelidate"],
+                    "ui_components": ["Vuetify", "Element Plus", "PrimeVue", "Quasar"],
+                    "default_architecture": "Composition API"
+                }
+            },
             # 支持的图片格式
             "supported_image_formats": [".jpg", ".jpeg", ".png", ".webp"],
             # 最大图片大小 (5MB)
@@ -185,12 +231,22 @@ class Config:
             "default_rag_method": "similarity",
             "default_retriever_top_k": 3,
             # Agent配置
-            "agent_types": ["ReActAgent", "ConversationalRetrievalAgent"],
+            "agent_types": ["ReActAgent", "ConversationalRetrievalAgent", "PlanAndExecuteAgent", "MRKLAgent"],
             "default_agent_type": "ReActAgent",
             "default_context_window_size": 4000,
             # 缓存配置
             "cache_enabled": True,
             "cache_ttl": 86400,  # 24小时
+            # 评估配置
+            "evaluation_enabled": True,
+            "evaluation_dimensions": [
+                "ui_completeness",
+                "layout_accuracy",
+                "tech_stack_relevance",
+                "component_reuse",
+                "style_consistency"
+            ],
+            "evaluation_threshold": 7.0,  # 低于此分数需要改进
         }
     
     @property

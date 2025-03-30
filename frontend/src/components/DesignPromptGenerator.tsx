@@ -1,21 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Button, Card, Input, Upload, message, Select, Slider, Tabs, 
-  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse, Checkbox, Tooltip, Empty 
+  Space, Alert, Spin, Typography, Radio, Image, Modal, Form, Divider, Collapse, Checkbox, Tooltip, Empty,
+  Switch, Row, Col, Badge, Progress, InputNumber, List, Tag, Descriptions, Statistic
 } from 'antd';
 import { 
   UploadOutlined, LoadingOutlined, SaveOutlined, EditOutlined, QuestionCircleOutlined,
-  CopyOutlined, CloseOutlined 
+  CopyOutlined, CloseOutlined, GithubOutlined, BranchesOutlined, DatabaseOutlined,
+  SettingOutlined, InfoCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined,
+  ReloadOutlined, LinkOutlined, PlusOutlined, CloudUploadOutlined
 } from '@ant-design/icons';
 import type { UploadFile, UploadProps } from 'antd/es/upload/interface';
 import { API_BASE_URL } from '../config';
 import ReactMarkdown from 'react-markdown';
 import copy from 'copy-to-clipboard';
+import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { atomOneDark } from 'react-syntax-highlighter/dist/esm/styles/hljs';
+import './DesignPromptGenerator.css';
 
 const { TextArea } = Input;
 const { Title, Text, Paragraph } = Typography;
 const { Option } = Select;
 const { Panel } = Collapse;
+const { TabPane } = Tabs;
 
 // 支持的图片类型
 const SUPPORTED_IMAGE_FORMATS = [
@@ -55,6 +62,16 @@ const fullScreenLoadingStyle: React.CSSProperties = {
   zIndex: 9999,
   color: 'white',
 };
+
+// 添加Git仓库状态接口
+interface GitRepoStatus {
+  status: 'idle' | 'processing' | 'completed' | 'error';
+  message?: string;
+  summary?: string;
+  processingTime?: number;
+  error?: string;
+  canRetry?: boolean;
+}
 
 const DesignPromptGenerator: React.FC = () => {
   // 基础状态
@@ -145,11 +162,140 @@ const DesignPromptGenerator: React.FC = () => {
   // 在状态定义部分添加跳过缓存选项
   const [skipCache, setSkipCache] = useState<boolean>(false);
   
+  // 在状态定义部分添加Git仓库相关状态
+  const [useGitRepo, setUseGitRepo] = useState<boolean>(false);
+  const [gitRepoUrl, setGitRepoUrl] = useState<string>('');
+  const [gitRepoBranch, setGitRepoBranch] = useState<string>('main');
+  const [gitRepoStatus, setGitRepoStatus] = useState<GitRepoStatus>({ 
+    status: 'idle' 
+  });
+  
   // 在RAG和Agent参数状态下方添加错误信息状态
   const [errorDetails, setErrorDetails] = useState<any>(null);
   
+  // 向量数据库状态
+  const [vectorDbStatus, setVectorDbStatus] = useState<'ready' | 'initializing' | 'error' | 'partial'>('initializing');
+  const [vectorDbError, setVectorDbError] = useState<string | null>(null);
+  
+  // 顶部import部分添加state定义
+  const [gitUsername, setGitUsername] = useState<string>('');
+  const [gitPassword, setGitPassword] = useState<string>('');
+  const [showGitCredentials, setShowGitCredentials] = useState<boolean>(false);
+  
+  // 添加新的提示说明
+  const [authTips, setAuthTips] = useState<boolean>(false);
+  
+  // 检查向量数据库状态
+  const checkVectorDbStatus = async () => {
+    try {
+      console.log('正在检查向量数据库状态...');
+      const response = await fetch(`${API_BASE_URL}/api/vector-db-status`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        mode: 'cors',
+        cache: 'no-cache'
+      });
+      
+      if (!response.ok) {
+        console.error('向量数据库状态检查失败:', response.status, response.statusText);
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('Vector DB Status:', data);
+      
+      if (data.error) {
+        console.error('向量数据库错误:', data.error);
+        setVectorDbStatus('error');
+        setVectorDbError(data.error);
+        return false;
+      }
+      
+      // 使用新的status字段
+      setVectorDbStatus(data.status);
+      
+      if (data.status === 'error') {
+        setVectorDbError(data.error || '向量数据库初始化失败');
+        console.warn('向量数据库状态: error', data.error || '无错误信息');
+        return false;
+      } else if (data.status === 'initializing') {
+        setVectorDbError('向量数据库正在初始化中，请稍后再试');
+        console.info('向量数据库状态: initializing');
+        return false;
+      } else if (data.status === 'partial') {
+        // 部分就绪状态，记录消息但允许使用
+        setVectorDbError(data.message || '向量数据库部分初始化，某些功能可能受限');
+        console.info('向量数据库状态: partial', data.message);
+        return true;
+      } else if (data.status === 'ready') {
+        setVectorDbError(null);
+        console.info('向量数据库状态: ready');
+        return true;
+      }
+      
+      // 兼容旧版API，如果没有status字段则使用is_ready
+      if (data.is_ready === true) {
+        console.info('向量数据库就绪 (兼容模式)');
+        return true;
+      }
+      
+      console.warn('向量数据库状态未知:', data);
+      return false;
+      
+    } catch (error) {
+      console.error('检查向量数据库状态失败:', error);
+      setVectorDbStatus('error');
+      setVectorDbError(error instanceof Error ? error.message : '检查向量数据库状态失败');
+      return false;
+    }
+  };
+
+  // 定期检查向量数据库状态
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout;
+    let retryCount = 0;
+    const maxRetries = 5;  // 最大重试次数
+    
+    const startStatusCheck = async () => {
+      // 立即检查一次
+      const isReady = await checkVectorDbStatus();
+      
+      if (!isReady && retryCount < maxRetries) {
+        // 如果数据库未就绪，每5秒检查一次
+        intervalId = setInterval(async () => {
+          retryCount++;
+          const ready = await checkVectorDbStatus();
+          
+          if (ready || retryCount >= maxRetries) {
+            clearInterval(intervalId);
+            if (!ready && retryCount >= maxRetries) {
+              console.error('向量数据库初始化超时');
+              setVectorDbError('向量数据库初始化超时，请刷新页面重试');
+            }
+          }
+        }, 5000);
+      }
+    };
+    
+    startStatusCheck();
+    
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, []);
+
   // 上传设计图
   const handleUploadDesign = async () => {
+    if (vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial') {
+      message.warning('请等待向量数据库初始化完成');
+      return;
+    }
+
     if (!designImage?.originFileObj) {
       message.error('请先选择设计图');
       return;
@@ -178,7 +324,14 @@ const DesignPromptGenerator: React.FC = () => {
       const result = await response.json();
       setUploadResult(result);
       setUploadStatus({ status: 'completed' });
-      message.success('设计图上传成功');
+      
+      // 检查向量存储状态
+      if (result.vector_store_success === false) {
+        message.warning('设计图已保存，但未成功添加到向量数据库，某些功能可能受限');
+        console.warn('设计图向量存储失败，可能会影响检索和生成质量');
+      } else {
+        message.success('设计图上传成功');
+      }
       
     } catch (error) {
       console.error('上传设计图失败:', error);
@@ -192,14 +345,119 @@ const DesignPromptGenerator: React.FC = () => {
     }
   };
   
+  // 单独分析Git仓库
+  const handleAnalyzeGitRepo = async () => {
+    try {
+      if (!gitRepoUrl.trim()) {
+        message.error('请输入项目本地路径');
+        return;
+      }
+      
+      setGitRepoStatus({
+        status: 'processing',
+        message: '正在分析项目代码...'
+      });
+      
+      // 准备请求数据
+      const formData = new FormData();
+      formData.append('local_project_path', gitRepoUrl.trim());
+      formData.append('git_repo_branch', gitRepoBranch); // 保留分支参数以支持本地Git项目
+      
+      // 发送请求到新的本地项目分析接口
+      const response = await fetch(`${API_BASE_URL}/api/analyze-local-project`, {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || '分析项目失败');
+      }
+      
+      const data = await response.json();
+      
+      if (data.status === 'error') {
+        setGitRepoStatus({
+          status: 'error',
+          message: '项目分析失败',
+          error: data.error,
+          canRetry: true
+        });
+        message.error(`项目分析失败: ${data.error}`);
+        return;
+      }
+      
+      // 设置成功状态
+      setGitRepoStatus({
+        status: 'completed',
+        message: '项目分析完成',
+        summary: data.summary,
+        processingTime: data.processing_time
+      });
+      
+      message.success('项目分析完成');
+      
+    } catch (error) {
+      console.error('项目分析错误:', error);
+      
+      setGitRepoStatus({
+        status: 'error',
+        message: '项目分析失败',
+        error: error instanceof Error ? error.message : String(error),
+        canRetry: true
+      });
+      
+      message.error(`项目分析失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  
   // 生成Prompt
   const handleGeneratePrompt = async () => {
-    try {
-    if (!uploadResult) {
-      message.error('请先上传设计图');
+    if (vectorDbStatus !== 'ready' && vectorDbStatus !== 'partial') {
+      message.warning('请等待向量数据库初始化完成');
       return;
     }
-    
+
+    try {
+      if (!uploadResult) {
+        message.error('请先上传设计图');
+        return;
+      }
+      
+      // 检查Git仓库分析状态
+      if (useGitRepo && gitRepoUrl) {
+        if (gitRepoStatus.status === 'idle') {
+          const shouldProceed = await new Promise<boolean>(resolve => {
+            Modal.confirm({
+              title: 'Git仓库尚未分析',
+              content: '您已启用Git仓库上下文，但尚未分析仓库。是否先分析Git仓库再生成提示词？',
+              okText: '先分析Git仓库',
+              cancelText: '跳过分析',
+              onOk: () => {
+                resolve(false);
+                handleAnalyzeGitRepo();
+              },
+              onCancel: () => resolve(true)
+            });
+          });
+          
+          if (!shouldProceed) return;
+        } else if (gitRepoStatus.status === 'error') {
+          const shouldProceed = await new Promise<boolean>(resolve => {
+            Modal.confirm({
+              title: 'Git仓库分析失败',
+              content: '之前的Git仓库分析失败。是否继续生成提示词？（这将不包含Git仓库上下文）',
+              okText: '继续',
+              cancelText: '取消',
+              onOk: () => resolve(true),
+              onCancel: () => resolve(false)
+            });
+          });
+          
+          if (!shouldProceed) return;
+        }
+      }
+      
       setGenerationStatus({ status: 'processing' });
       setFullScreenLoading(true);
       setLoadingMessage('正在生成Prompt...');
@@ -209,7 +467,7 @@ const DesignPromptGenerator: React.FC = () => {
       const startTime = Date.now();
       
       // 准备请求数据
-      const requestData = {
+      const requestData: any = {
         tech_stack: techStack,
         design_image_id: uploadResult.image_id,
         design_image_path: uploadResult.file_path,
@@ -220,6 +478,12 @@ const DesignPromptGenerator: React.FC = () => {
         context_window_size: contextWindowSize,
         skip_cache: skipCache // 添加跳过缓存参数
       };
+      
+      // 添加Git仓库信息（如果启用）
+      if (useGitRepo && gitRepoUrl) {
+        requestData.git_repo_url = gitRepoUrl;
+        requestData.git_repo_branch = gitRepoBranch;
+      }
       
       // 添加前端重试逻辑
       const maxRetries = 2; // 前端最多重试2次
@@ -445,15 +709,27 @@ const DesignPromptGenerator: React.FC = () => {
         cache: 'no-cache'
       });
       
-      if (!response.ok) {
+      const data = await response.json();
+      
+      if (response.ok) {
+        if (data.status === 'success') {
+          setSaveStatus({ status: 'completed' });
+          setShowSaveConfirm(false);
+          message.success('Prompt保存成功');
+        } else if (data.status === 'partial_success') {
+          setSaveStatus({ status: 'completed' });
+          setShowSaveConfirm(false);
+          message.warning('Prompt已保存，但使用了备选方法：' + data.message);
+        } else if (data.status === 'warning') {
+          setSaveStatus({ status: 'completed' });
+          setShowSaveConfirm(false);
+          message.warning('Prompt已保存，但可能存在问题：' + data.message);
+        } else {
+          throw new Error(data.message || '保存失败，状态码: ' + data.status);
+        }
+      } else {
         throw new Error(`保存失败: ${response.status} ${response.statusText}`);
       }
-      
-      // 不需要使用结果变量
-      await response.json();
-      setSaveStatus({ status: 'completed' });
-      setShowSaveConfirm(false);
-      message.success('Prompt保存成功');
       
     } catch (error) {
       console.error('保存Prompt失败:', error);
@@ -488,93 +764,247 @@ const DesignPromptGenerator: React.FC = () => {
     setShowSaveConfirm(false);
   };
   
-  // 添加设计分析展示组件
-  const renderDesignAnalysis = () => {
-    if (!designAnalysis || Object.keys(designAnalysis).length === 0) {
+  // 设计分析结果展示
+  const renderDesignAnalysisSimple = () => {
+    if (!uploadResult || !uploadResult.design_analysis) {
       return null;
     }
 
-    // 准备Collapse的items
-    const collapseItems = [];
-    
-    if (designAnalysis.design_style) {
-      collapseItems.push({
-        key: 'design_style',
-        label: '设计风格',
-        children: <Paragraph>{designAnalysis.design_style}</Paragraph>
-      });
-    }
-    
-    if (designAnalysis.layout) {
-      collapseItems.push({
-        key: 'layout',
-        label: '布局结构',
-        children: <Paragraph>{designAnalysis.layout}</Paragraph>
-      });
-    }
-    
-    if (designAnalysis.color_scheme) {
-      collapseItems.push({
-        key: 'color_scheme',
-        label: '颜色方案',
-        children: <Paragraph>{designAnalysis.color_scheme}</Paragraph>
-      });
-    }
-    
-    if (designAnalysis.ui_components) {
-      collapseItems.push({
-        key: 'ui_components',
-        label: 'UI组件',
-        children: Array.isArray(designAnalysis.ui_components) ? (
-          <ul>
-            {designAnalysis.ui_components.map((component: any, index: number) => (
-              <li key={index}>
-                {typeof component === 'object' ? 
-                  `${component.name || '组件'}: ${component.description || ''}` : 
-                  String(component)
-                }
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <Paragraph>{designAnalysis.ui_components}</Paragraph>
-        )
-      });
-    }
-    
-    if (designAnalysis.interaction_elements) {
-      collapseItems.push({
-        key: 'interaction_elements',
-        label: '交互元素',
-        children: <Paragraph>{designAnalysis.interaction_elements}</Paragraph>
-      });
-    }
-    
-    if (designAnalysis.usability) {
-      collapseItems.push({
-        key: 'usability',
-        label: '可用性评估',
-        children: <Paragraph>{designAnalysis.usability}</Paragraph>
-      });
-    }
-    
-    if (designAnalysis.tech_implementation) {
-      collapseItems.push({
-        key: 'tech_implementation',
-        label: '技术实现建议',
-        children: <Paragraph>{designAnalysis.tech_implementation}</Paragraph>
-      });
-    }
-
     return (
-      <Card 
-        title="设计分析结果" 
-        style={{ marginTop: 16 }}
-        extra={<Text type="secondary">AI分析结果</Text>}
-      >
-        <Collapse defaultActiveKey={['design_style', 'ui_components']} items={collapseItems} />
+      <Card title="设计分析摘要" style={{ marginTop: 16 }}>
+        <Typography.Paragraph>
+          {uploadResult.design_analysis.summary || '无设计分析摘要'}
+        </Typography.Paragraph>
       </Card>
     );
+  };
+  
+  // 渲染设置面板
+  const renderSettingsPanel = () => {
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <Collapse defaultActiveKey={['settings']}>
+          <Panel header="高级设置" key="settings">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div>
+                <Typography.Text strong>技术栈</Typography.Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={techStack}
+                  onChange={setTechStack}
+                >
+                  {TECH_STACKS.map(tech => (
+                    <Option key={tech} value={tech}>{tech}</Option>
+                  ))}
+                </Select>
+              </div>
+              
+              <Divider style={{ margin: '8px 0' }} />
+              
+              {/* Git仓库设置 */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                  <Checkbox 
+                    checked={useGitRepo} 
+                    onChange={(e) => setUseGitRepo(e.target.checked)}
+                    style={{ marginRight: 8 }}
+                  />
+                  <Typography.Text strong>使用代码仓库作为上下文</Typography.Text>
+                  <Tooltip title="通过分析代码仓库，提高生成Prompt的准确性">
+                    <QuestionCircleOutlined style={{ marginLeft: 8 }} />
+                  </Tooltip>
+                </div>
+                
+                {useGitRepo && (
+                  <>
+                    <Row gutter={16}>
+                      <Col span={16}>
+                        <Form.Item
+                          label={
+                            <span>
+                              <LinkOutlined /> 项目本地路径
+                              <Tooltip title="输入项目在本地电脑上的完整路径">
+                                <InfoCircleOutlined style={{ marginLeft: 4 }} />
+                              </Tooltip>
+                            </span>
+                          }
+                          name="gitRepoUrl"
+                        >
+                          <Input 
+                            placeholder="例如: C:\Projects\MyProject 或 /Users/username/Projects/MyProject" 
+                            value={gitRepoUrl}
+                            onChange={e => setGitRepoUrl(e.target.value)}
+                            disabled={gitRepoStatus.status === 'processing' || generationStatus.status === 'processing'}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Button 
+                          type="primary"
+                          onClick={handleAnalyzeGitRepo}
+                          loading={gitRepoStatus.status === 'processing'}
+                          disabled={!gitRepoUrl || generationStatus.status === 'processing'}
+                          icon={<DatabaseOutlined />}
+                          style={{ width: '100%' }}
+                        >
+                          分析本地项目
+                        </Button>
+                      </Col>
+                    </Row>
+                    
+                    {renderGitRepoStatus()}
+                  </>
+                )}
+              </div>
+              
+              <Divider style={{ margin: '8px 0' }} />
+              
+              <div>
+                <Typography.Text strong>检索方法</Typography.Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={ragMethod}
+                  onChange={setRagMethod}
+                >
+                  <Option value="similarity">相似度检索</Option>
+                  <Option value="mmr">最大边际相关性 (MMR)</Option>
+                  <Option value="hybrid">混合检索</Option>
+                </Select>
+              </div>
+              
+              <div>
+                <Typography.Text strong>温度 ({temperature})</Typography.Text>
+                <Slider
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  value={temperature}
+                  onChange={setTemperature}
+                />
+              </div>
+              
+              <div>
+                <Typography.Text strong>检索结果数量 ({retrieverTopK})</Typography.Text>
+                <Slider
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={retrieverTopK}
+                  onChange={setRetrieverTopK}
+                />
+              </div>
+              
+              <div>
+                <Typography.Text strong>上下文窗口大小 ({contextWindowSize})</Typography.Text>
+                <Slider
+                  min={1000}
+                  max={8000}
+                  step={1000}
+                  value={contextWindowSize}
+                  onChange={setContextWindowSize}
+                />
+              </div>
+              
+              <div>
+                <Checkbox
+                  checked={skipCache}
+                  onChange={(e) => setSkipCache(e.target.checked)}
+                >
+                  跳过缓存（强制重新生成）
+                </Checkbox>
+              </div>
+            </div>
+          </Panel>
+        </Collapse>
+      </div>
+    );
+  };
+  
+  // 添加Git仓库状态显示组件
+  const renderGitRepoStatus = () => {
+    if (!useGitRepo || !gitRepoUrl) {
+      return null;
+    }
+    
+    if (gitRepoStatus.status === 'idle') {
+      return null;
+    }
+    
+    if (gitRepoStatus.status === 'processing') {
+      return (
+        <Alert
+          type="info"
+          showIcon
+          icon={<SyncOutlined spin />}
+          message="项目分析中"
+          description={
+            <div>
+              <p>正在分析本地项目: {gitRepoUrl}</p>
+              <p>请稍候，这可能需要几秒钟...</p>
+            </div>
+          }
+        />
+      );
+    }
+    
+    if (gitRepoStatus.status === 'error') {
+      return (
+        <Alert
+          type="error"
+          showIcon
+          message="项目分析失败"
+          description={
+            <div>
+              <p>分析本地项目时出错: {gitRepoStatus.error}</p>
+              <p>请检查项目路径是否正确，并确保有访问权限。</p>
+              <Button 
+                type="primary" 
+                size="small" 
+                onClick={handleAnalyzeGitRepo}
+                style={{ marginTop: 8 }}
+              >
+                重试
+              </Button>
+            </div>
+          }
+        />
+      );
+    }
+    
+    if (gitRepoStatus.status === 'completed') {
+      return (
+        <Alert
+          type="success"
+          showIcon
+          message="项目分析完成"
+          description={
+            <div>
+              <p>本地项目路径: {gitRepoUrl}</p>
+              {gitRepoStatus.processingTime && (
+                <p>处理耗时: {gitRepoStatus.processingTime.toFixed(2)}秒</p>
+              )}
+              {gitRepoStatus.summary && (
+                <div>
+                  <p><strong>项目概述:</strong></p>
+                  <div style={{ 
+                    maxHeight: '100px', 
+                    overflowY: 'auto', 
+                    padding: '8px', 
+                    background: '#f5f5f5', 
+                    borderRadius: '4px',
+                    marginTop: '8px'
+                  }}>
+                    {gitRepoStatus.summary}
+                  </div>
+                </div>
+              )}
+            </div>
+          }
+        />
+      );
+    }
+    
+    return null;
   };
   
   // 渲染生成状态
@@ -752,12 +1182,230 @@ const DesignPromptGenerator: React.FC = () => {
     }
   };
   
+  // 添加新的显示技术栈特定组件的面板
+  const renderTechStackSpecificComponents = (repoAnalysis: any) => {
+    if (!repoAnalysis || !repoAnalysis.ui_components || repoAnalysis.ui_components.length === 0) {
+      return <Empty description="无可用组件" />;
+    }
+    
+    return (
+      <Collapse defaultActiveKey={['1']}>
+        <Panel header="项目组件库" key="1">
+          <List
+            dataSource={repoAnalysis.ui_components}
+            renderItem={(component: any) => (
+              <List.Item>
+                <Card
+                  size="small"
+                  title={component.name}
+                  extra={
+                    <Tooltip title="使用此组件">
+                      <Button 
+                        type="text" 
+                        icon={<PlusOutlined />}
+                        onClick={() => addComponentToPrompt(component)}
+                      />
+                    </Tooltip>
+                  }
+                >
+                  <p>{component.description}</p>
+                  {component.usage_example && (
+                    <SyntaxHighlighter language="typescript" style={atomOneDark}>
+                      {component.usage_example}
+                    </SyntaxHighlighter>
+                  )}
+                </Card>
+              </List.Item>
+            )}
+          />
+        </Panel>
+      </Collapse>
+    );
+  };
+
+  // 添加项目UI规范面板
+  const renderUIStandards = (repoAnalysis: any) => {
+    if (!repoAnalysis || !repoAnalysis.ui_standards) {
+      return <Empty description="无可用UI规范" />;
+    }
+    
+    return (
+      <Collapse defaultActiveKey={['1']}>
+        <Panel header="项目UI规范" key="1">
+          <List
+            dataSource={Object.entries(repoAnalysis.ui_standards || {})}
+            renderItem={([key, value]: [string, any]) => (
+              <List.Item>
+                <Text strong>{key}:</Text> {value}
+              </List.Item>
+            )}
+          />
+        </Panel>
+      </Collapse>
+    );
+  };
+
+  // 添加生成提示词评估结果展示
+  const renderEvaluationResults = (promptEvaluation: any) => {
+    if (!promptEvaluation) return null;
+    
+    // 评估维度中文标签
+    const dimensionLabels: {[key: string]: string} = {
+      ui_completeness: "UI完整度",
+      layout_accuracy: "布局准确性",
+      tech_stack_relevance: "技术栈相关性",
+      component_reuse: "组件复用",
+      style_consistency: "样式一致性"
+    };
+    
+    return (
+      <Card title="提示词评估" className="evaluation-card">
+        <Row gutter={[16, 16]}>
+          {Object.entries(promptEvaluation.scores || {}).map(([dimension, score]) => (
+            <Col span={12} key={dimension}>
+              <Statistic
+                title={dimensionLabels[dimension] || dimension}
+                value={score as number}
+                suffix="/10"
+                valueStyle={{ color: (score as number) >= 7 ? '#3f8600' : (score as number) >= 5 ? '#cf9f00' : '#cf1322' }}
+              />
+            </Col>
+          ))}
+        </Row>
+        
+        {promptEvaluation.improvement_suggestions && (
+          <div className="improvement-suggestions">
+            <Divider />
+            <Title level={5}>改进建议</Title>
+            <ReactMarkdown>{promptEvaluation.improvement_suggestions}</ReactMarkdown>
+          </div>
+        )}
+      </Card>
+    );
+  };
+
+  // 添加设计分析结果可视化
+  const renderDesignAnalysis = (designAnalysis: any) => {
+    if (!designAnalysis || !designAnalysis.tech_stack_analysis) {
+      return null;
+    }
+    
+    return (
+      <Card title="设计分析结果" className="design-analysis-card">
+        <Tabs defaultActiveKey="1">
+          <TabPane tab="UI组件" key="1">
+            <List
+              dataSource={designAnalysis.ui_components || []}
+              renderItem={(component: any) => (
+                <List.Item>
+                  <Card
+                    size="small"
+                    title={component.name}
+                    extra={
+                      <Tag color="blue">{component.tech_stack}</Tag>
+                    }
+                  >
+                    <p>{component.description}</p>
+                  </Card>
+                </List.Item>
+              )}
+            />
+          </TabPane>
+          <TabPane tab="配色方案" key="2">
+            <Row gutter={[16, 16]}>
+              {(designAnalysis.color_scheme?.primary_colors || []).map((color: any, index: number) => (
+                <Col span={8} key={index}>
+                  <Card bodyStyle={{ padding: 10 }}>
+                    <div style={{ 
+                      backgroundColor: color.color, 
+                      height: 80, 
+                      borderRadius: 4,
+                      marginBottom: 8
+                    }} />
+                    <div>
+                      <Text strong>{color.role.toUpperCase()}</Text>
+                      <br />
+                      <Text>{color.color}</Text>
+                      <br />
+                      <Text type="secondary">{Math.round(color.percentage * 100)}%</Text>
+                    </div>
+                  </Card>
+                </Col>
+              ))}
+            </Row>
+            <Divider orientation="left">调色板</Divider>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {(designAnalysis.color_scheme?.color_palette || []).map((color: string, index: number) => (
+                <Tooltip title={color} key={index}>
+                  <div style={{ 
+                    backgroundColor: color, 
+                    width: 40, 
+                    height: 40, 
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    border: '1px solid #f0f0f0'
+                  }} onClick={() => copy(color)} />
+                </Tooltip>
+              ))}
+            </div>
+          </TabPane>
+          <TabPane tab="排版" key="3">
+            <Descriptions bordered column={1}>
+              <Descriptions.Item label="字体家族">{designAnalysis.typography?.font_family || '未识别'}</Descriptions.Item>
+            </Descriptions>
+            <Divider orientation="left">文本样式</Divider>
+            <List
+              dataSource={designAnalysis.typography?.text_styles || []}
+              renderItem={(style: any) => (
+                <List.Item>
+                  <Text strong>{style.type}:</Text> {style.size}
+                </List.Item>
+              )}
+            />
+          </TabPane>
+          <TabPane tab="间距" key="4">
+            <Descriptions bordered column={1}>
+              <Descriptions.Item label="水平间距">{designAnalysis.spacing?.horizontal_spacing || '未识别'}</Descriptions.Item>
+              <Descriptions.Item label="垂直间距">{designAnalysis.spacing?.vertical_spacing || '未识别'}</Descriptions.Item>
+              <Descriptions.Item label="内边距">{designAnalysis.spacing?.padding || '未识别'}</Descriptions.Item>
+              <Descriptions.Item label="外边距">{designAnalysis.spacing?.margin || '未识别'}</Descriptions.Item>
+              <Descriptions.Item label="对齐方式">{designAnalysis.spacing?.alignment || '未识别'}</Descriptions.Item>
+            </Descriptions>
+          </TabPane>
+        </Tabs>
+      </Card>
+    );
+  };
+
+  // 添加组件到提示词的功能
+  const addComponentToPrompt = (component: any) => {
+    // 获取当前编辑状态的提示词
+    const currentPrompt = isEditing ? editedPrompt : generatedPrompt;
+    
+    // 构建组件描述
+    const componentDesc = `\n\n## 使用组件: ${component.name}\n${component.description}`;
+    
+    // 添加到提示词
+    if (isEditing) {
+      setEditedPrompt(currentPrompt + componentDesc);
+    } else {
+      setGeneratedPrompt(currentPrompt + componentDesc);
+      setEditedPrompt(currentPrompt + componentDesc);
+      setIsEditing(true);
+    }
+    
+    message.success(`已添加组件: ${component.name}`);
+  };
+
   return (
     <div style={{ padding: '20px' }}>
       <Title level={2}>设计图Prompt生成</Title>
       <Paragraph>
         上传设计图并选择技术栈，生成对应的开发提示词。
       </Paragraph>
+      
+      {/* 设置面板 */}
+      {renderSettingsPanel()}
       
       <Card title="步骤1: 上传设计图" style={{ marginBottom: '20px' }}>
         <Form layout="vertical">
@@ -905,70 +1553,72 @@ const DesignPromptGenerator: React.FC = () => {
         style={{ marginBottom: '20px' }}
       >
         {generationStatus.status === 'completed' ? (
-          <div style={{ display: 'flex', flexDirection: 'row', gap: '16px' }}>
-            <div style={{ flex: 1 }}>
-              {/* 生成结果展示 */}
+          <Row gutter={[16, 16]}>
+            <Col span={16}>
               <Card 
-                title="生成的Prompt" 
-                style={{ marginTop: 16 }}
-        extra={
-            <Space>
-                    {!isEditing ? (
-                <Button 
-                  type="primary" 
-                  icon={<EditOutlined />} 
-                  onClick={handleStartEditing}
-                        disabled={!generatedPrompt}
-                >
-                  编辑
-                </Button>
-                    ) : (
-                      <>
-                        <Button onClick={handleCancelEditing}>取消</Button>
+                title="生成的提示词" 
+                extra={
+                  <Space>
+                    <Button
+                      icon={<EditOutlined />}
+                      onClick={() => {
+                        setIsEditing(true);
+                        setEditedPrompt(generatedPrompt);
+                      }}
+                    >
+                      编辑
+                    </Button>
+                    <Button
+                      icon={<CopyOutlined />}
+                      onClick={() => {
+                        copy(generatedPrompt);
+                        message.success('已复制到剪贴板');
+                      }}
+                    >
+                      复制
+                    </Button>
+                  </Space>
+                }
+              >
+                {isEditing ? (
+                  <>
+                    <TextArea
+                      value={editedPrompt}
+                      onChange={(e) => setEditedPrompt(e.target.value)}
+                      style={{ height: 400 }}
+                    />
+                    <div style={{ marginTop: 16, textAlign: 'right' }}>
+                      <Space>
+                        <Button onClick={() => setIsEditing(false)}>取消</Button>
                         <Button 
-                          type="primary" 
-                          icon={<SaveOutlined />} 
-                          onClick={handleConfirmSave}
+                          type="primary"
+                          onClick={() => {
+                            setGeneratedPrompt(editedPrompt);
+                            setIsEditing(false);
+                            message.success('提示词已更新');
+                          }}
                         >
                           保存
                         </Button>
-                      </>
-              )}
-            </Space>
-                }
-              >
-        {generatedPrompt ? (
-          isEditing ? (
-            <TextArea 
-              value={editedPrompt} 
-              onChange={e => setEditedPrompt(e.target.value)} 
-              autoSize={{ minRows: 10, maxRows: 20 }}
-            />
-          ) : (
-                    <div className="generated-prompt-container">
-                      <div className="prompt-actions" style={{ marginBottom: '16px' }}>
-                        <Button 
-                          type="text" 
-                          icon={<CopyOutlined />} 
-                          onClick={() => copyToClipboard(generatedPrompt)}
-                        >
-                          复制全文
-                        </Button>
-                      </div>
-                      <div className="prompt-content" style={{ maxHeight: '600px', overflow: 'auto' }}>
-                        {formatGeneratedPrompt(generatedPrompt)}
-                      </div>
+                      </Space>
                     </div>
-                  )
+                  </>
                 ) : (
-                  <CustomEmpty description="请先生成Prompt" />
+                  <div className="generated-prompt-content">
+                    {formatGeneratedPrompt(generatedPrompt)}
+                  </div>
                 )}
               </Card>
-              
-              {/* 设计分析结果展示 */}
-              {renderDesignAnalysis()}
-            </div>
-          </div>
+            </Col>
+            <Col span={8}>
+              <Space direction="vertical" style={{ width: '100%' }} size="large">
+                {renderEvaluationResults(uploadResult?.evaluation_result)}
+                {renderDesignAnalysis(uploadResult?.design_analysis)}
+                {renderTechStackSpecificComponents(uploadResult?.repo_analysis)}
+                {renderUIStandards(uploadResult?.repo_analysis)}
+              </Space>
+            </Col>
+          </Row>
         ) : (
           <CustomEmpty description="请先生成Prompt" />
         )}
