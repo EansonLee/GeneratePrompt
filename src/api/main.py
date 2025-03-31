@@ -53,7 +53,7 @@ from src.prompt_optimizer import PromptOptimizer
 from src.utils.design_image_processor import DesignImageProcessor
 from src.utils.local_project_processor import LocalProjectProcessor
 from src.utils.rag_manager import RAGManager
-from src.agents.design_prompt_agent import DesignPromptAgent
+from src.agents.design_prompt_agent import DesignPromptAgent, DesignPromptRequest, ResponseStatus
 
 # 配置日志
 logging.basicConfig(**settings.get_logging_config())
@@ -130,8 +130,6 @@ class GenerateDesignPromptRequest(BaseModel):
     context_window_size: int = Field(settings.DESIGN_PROMPT_CONFIG["default_context_window_size"], description="上下文窗口大小")
     skip_cache: bool = Field(False, description="是否跳过缓存（强制重新生成）")
     prompt: Optional[str] = Field(None, description="提示词")
-    git_repo_url: Optional[str] = Field(None, description="Git仓库URL")
-    git_repo_branch: Optional[str] = Field("main", description="Git仓库分支")
 
 class SaveUserModifiedPromptRequest(BaseModel):
     """保存用户修改后的Prompt请求"""
@@ -581,158 +579,184 @@ async def upload_design_image(
 async def generate_design_prompt(request: GenerateDesignPromptRequest):
     """生成设计图Prompt
     
-    根据设计图和参数生成设计图Prompt
-    
     Args:
-        request: 生成设计图Prompt请求
+        request: 设计图Prompt请求，包含技术栈、设计图ID等信息
         
     Returns:
-        Dict[str, Any]: 生成结果
+        Dict[str, Any]: 生成的Prompt响应，包含状态、消息、提示词、分析结果等
     """
+    start_time = time.time()  # 确保在所有执行路径之前定义start_time
     try:
-        start_time = time.time()
+        # 记录请求基本信息，但不记录完整的base64数据
+        design_id_log = request.design_image_id
+        if request.design_image_id and request.design_image_id.startswith('data:image/'):
+            design_id_log = f"[BASE64_IMAGE]({len(request.design_image_id)} 字符)"
         
-        # 处理设计图
-        design_image_id = request.design_image_id
-        tech_stack = request.tech_stack
+        logger.info(f"接收到设计图Prompt生成请求: tech_stack={request.tech_stack}, design_image_id={design_id_log}")
         
-        # 检查必要参数
-        if not design_image_id:
-            raise HTTPException(status_code=400, detail="缺少设计图ID")
-        if not tech_stack:
-            raise HTTPException(status_code=400, detail="缺少技术栈")
-            
-        # 初始化任务状态跟踪
-        tasks_status = {
-            "design_processing": {"status": "pending"},
-            "git_analysis": {"status": "idle"}
-        }
-        
-        # 处理设计图
-        try:
-            tasks_status["design_processing"]["status"] = "processing"
-            # 检查设计图文件是否存在
-            image_path = design_image_processor._get_design_image_path(design_image_id)
-            if not os.path.exists(image_path):
-                raise HTTPException(status_code=404, detail=f"设计图文件不存在: {design_image_id}")
-                
-            # 检查是否需要处理Git仓库
-            git_repo_url = request.git_repo_url
-            git_repo_branch = request.git_repo_branch if request.git_repo_branch else 'main'
-            git_analysis_result = None
-            
-            if git_repo_url:
-                tasks_status["git_analysis"]["status"] = "processing"
-                logging.info(f"处理Git仓库: {git_repo_url}")
-                
-                # 使用本地项目处理器分析
-                git_analysis_result = await local_project_processor.analyze_project(
-                    project_path=git_repo_url,
-                    branch=git_repo_branch
-                )
-                
-                if git_analysis_result.get("status") == "success":
-                    tasks_status["git_analysis"]["status"] = "completed"
-                    tasks_status["git_analysis"]["result"] = git_analysis_result
-                    logging.info(f"Git仓库分析完成: {git_repo_url}")
-                else:
-                    tasks_status["git_analysis"]["status"] = "error"
-                    tasks_status["git_analysis"]["error"] = git_analysis_result.get("error")
-                    logging.warning(f"Git仓库分析失败: {git_analysis_result.get('error')}")
-            
-            # 生成Prompt
-            tasks_status["design_processing"]["status"] = "completed"
-            
-            logging.info(f"开始生成Prompt：设计图={design_image_id}, 技术栈={tech_stack}")
-            result = await design_prompt_agent.generate_design_prompt(
-                design_image_id=design_image_id,
-                tech_stack=tech_stack,
-                agent_type=request.agent_type,
-                rag_method=request.rag_method,
-                retriever_top_k=request.retriever_top_k,
-                temperature=request.temperature,
-                context_window_size=request.context_window_size,
-                skip_cache=request.skip_cache,
-                project_analysis=git_analysis_result
+        # 验证参数
+        if not request.design_image_id:
+            raise HTTPException(
+                status_code=400,
+                detail="设计图ID不能为空"
             )
             
-            # 构造响应
-            processing_time = time.time() - start_time
-            logging.info(f"Prompt生成成功，耗时: {processing_time:.2f}秒")
+        # 检查design_image_id是否是base64数据
+        base64_data = None
+        if request.design_image_id.startswith("data:image/"):
+            logger.info("检测到design_image_id是base64数据")
+            base64_data = request.design_image_id
             
-            # 将任务状态添加到响应中
-            result["tasks_status"] = tasks_status
-            result["processing_time"] = processing_time
-            
-            return result
-            
-        except Exception as e:
-            tasks_status["design_processing"]["status"] = "error"
-            tasks_status["design_processing"]["error"] = str(e)
-            logging.error(f"处理设计图失败: {str(e)}")
-            raise
-    except Exception as e:
-        logging.error(f"生成Prompt失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"生成Prompt失败: {str(e)}")
-
-@app.post("/api/design/analyze-git-repo")
-async def analyze_git_repo(
-    background_tasks: BackgroundTasks,
-    git_repo_url: str = Form(...),
-    git_repo_branch: str = Form("main")
-):
-    """分析Git仓库，提取代码上下文信息
-    
-    Args:
-        git_repo_url: Git仓库URL
-        git_repo_branch: Git仓库分支
+            # 检查base64数据长度
+            try:
+                # 计算数据长度
+                data_length = len(base64_data)
+                # 设置最大长度限制为10MB的base64字符串
+                max_length = 10 * 1024 * 1024
+                if data_length > max_length:
+                    logger.warning(f"base64数据过长: {data_length} 字符，超过了 {max_length} 的限制")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"图像数据过大，请使用小于10MB的图像"
+                    )
+                
+                # 验证base64格式
+                if ',' not in base64_data:
+                    logger.warning("base64数据格式不正确，缺少逗号分隔符")
+                    raise HTTPException(
+                        status_code=400,
+                        detail="base64图像数据格式不正确"
+                    )
+                
+                # 提取数据部分，检查是否为有效的base64
+                try:
+                    import base64
+                    header, encoded_data = base64_data.split(',', 1)
+                    # 尝试解码一小部分数据，验证是否为有效的base64
+                    base64.b64decode(encoded_data[:100].encode('utf-8'))
+                    logger.info("base64数据格式有效")
+                except Exception as e:
+                    logger.warning(f"base64数据解码测试失败: {str(e)}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"无效的base64图像数据"
+                    )
+            except Exception as e:
+                if isinstance(e, HTTPException):
+                    raise e
+                logger.error(f"处理base64数据时出错: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"处理图像数据失败: {str(e)}"
+                )
         
-    Returns:
-        Dict[str, Any]: Git仓库分析结果
-    """
-    try:
-        start_time = time.time()
+        # 检查技术栈
+        if not request.tech_stack or request.tech_stack not in settings.DESIGN_PROMPT_CONFIG.get("supported_tech_stacks", []):
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的技术栈: {request.tech_stack}"
+            )
         
-        logging.info(f"开始分析Git仓库: {git_repo_url}")
+        # 确保向量存储初始化完成
+        from src.utils.vector_store import VectorStore
+        vector_store = VectorStore()
         
-        # 使用本地项目处理器
-        git_analysis_result = await local_project_processor.analyze_project(
-            project_path=git_repo_url,
-            branch=git_repo_branch
+        # 确保存储属性都可以直接访问
+        if hasattr(vector_store, 'fix_stores'):
+            vector_store.fix_stores()
+        if hasattr(vector_store, 'ensure_store_attributes'):
+            success = vector_store.ensure_store_attributes()
+            if not success:
+                logger.warning("向量存储属性确保失败，可能导致检索问题")
+        
+        # 检查向量存储是否就绪
+        if not vector_store.is_ready():
+            logger.warning("向量存储未就绪，可能会影响相似设计检索质量")
+        
+        # 初始化设计图处理器
+        from src.utils.design_image_processor import DesignImageProcessor
+        design_image_processor = DesignImageProcessor(vector_store=vector_store)
+        
+        # 初始化LocalProjectProcessor
+        from src.utils.local_project_processor import LocalProjectProcessor
+        local_project_processor = LocalProjectProcessor(vector_store=vector_store)
+        
+        # 初始化RAG管理器
+        from src.utils.rag_manager import RAGManager
+        rag_manager = RAGManager(vector_store=vector_store)
+        
+        # 初始化设计图Prompt生成Agent
+        from src.agents.design_prompt_agent import DesignPromptAgent, DesignPromptRequest
+        agent = DesignPromptAgent(
+            vector_store=vector_store,
+            design_processor=design_image_processor,
+            temperature=request.temperature,
+            context_window_size=request.context_window_size,
+            skip_cache=request.skip_cache
         )
         
-        processing_time = time.time() - start_time
+        # 初始化Agent状态
+        agent._init_state(request.design_image_id)
         
-        # 添加后台任务保存向量存储
-        if vector_store:
-            background_tasks.add_task(vector_store.save)
+        # 设置技术栈
+        agent.state["tech_stack"] = request.tech_stack
         
-        # 添加处理时间
-        git_analysis_result["processing_time"] = processing_time
+        # 若有base64数据，临时保存到状态中
+        if base64_data:
+            agent.state["design_image_base64"] = base64_data
+            logger.info("已将base64数据保存到Agent状态中")
         
-        # 返回结果
-        if git_analysis_result.get("status") != "success":
-            logging.warning(f"Git仓库分析失败: {git_analysis_result.get('error')}")
-            return {
-                "status": "error",
-                "error": git_analysis_result.get("error"),
-                "processing_time": processing_time
-            }
-        else:
-            logging.info(f"Git仓库分析完成: {git_repo_url}, 耗时: {processing_time:.2f}秒")
-            return {
-                "status": "success",
-                "git_analysis": git_analysis_result,
-                "summary": local_project_processor.get_project_summary(git_analysis_result),
-                "processing_time": processing_time
-            }
-            
-    except Exception as e:
-        logging.error(f"分析Git仓库失败: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"分析Git仓库失败: {str(e)}"
+        # 创建请求对象
+        agent_request = DesignPromptRequest(
+            tech_stack=request.tech_stack,
+            tech_stack_components=None,  # 如果需要，可从request中获取
+            agent_type=request.agent_type,
+            rag_method=request.rag_method,
+            retriever_top_k=request.retriever_top_k,
+            temperature=request.temperature,
+            context_window_size=request.context_window_size,
+            skip_cache=request.skip_cache
         )
+        
+        # 生成Prompt
+        response = await agent.generate_design_prompt(
+            design_image_id=request.design_image_id,
+            design_prompt_request=agent_request,
+            skip_cache=request.skip_cache
+        )
+        
+        logger.info(f"生成设计图Prompt完成，状态: {response.status}, 耗时: {time.time() - start_time:.2f}秒")
+        
+        # 返回统一结构的响应
+        return {
+            "status": response.status,
+            "message": response.message,
+            "prompt": response.prompt,
+            "design_analysis": response.design_analysis,
+            "project_analysis": response.project_analysis,
+            "similar_designs": response.similar_designs,
+            "tech_stack": request.tech_stack,
+            "processing_time": time.time() - start_time
+        }
+        
+    except Exception as e:
+        process_time = time.time() - start_time
+        logger.error(f"生成设计图Prompt时出错: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        if isinstance(e, HTTPException):
+            raise e
+        
+        return {
+            "status": "failed",
+            "message": f"生成设计图Prompt失败: {str(e)}",
+            "prompt": "",
+            "design_analysis": "",
+            "project_analysis": "",
+            "similar_designs": "",
+            "tech_stack": getattr(request, "tech_stack", ""),
+            "processing_time": process_time
+        }
 
 @app.post("/api/design/save")
 async def save_user_modified_prompt(request: SaveUserModifiedPromptRequest):
@@ -1074,6 +1098,31 @@ async def startup_event():
                 # 检查vector_store是否已正确初始化
                 if hasattr(vector_store, 'stores') and vector_store.stores:
                     logger.info("向量存储初始化成功")
+                    
+                    # 修复存储属性
+                    if hasattr(vector_store, 'fix_stores'):
+                        logger.info("检查并修复向量存储属性...")
+                        vector_store.fix_stores()
+                        
+                    # 确保所有属性直接可访问
+                    if hasattr(vector_store, 'ensure_store_attributes'):
+                        logger.info("确保所有存储属性可直接访问...")
+                        vector_store.ensure_store_attributes()
+                        
+                    # 验证存储是否就绪
+                    if hasattr(vector_store, 'is_ready') and vector_store.is_ready():
+                        logger.info("向量存储已就绪")
+                    else:
+                        logger.warning("向量存储未就绪，尝试修复")
+                        
+                    # 查看存储状态
+                    if hasattr(vector_store, 'get_store_stats'):
+                        try:
+                            stats = await vector_store.get_store_stats()
+                            logger.info(f"向量存储统计: {stats}")
+                        except Exception as stats_err:
+                            logger.error(f"获取向量存储统计失败: {str(stats_err)}")
+                    
                     break
                 else:
                     logger.warning(f"向量存储初始化尝试 {attempt + 1}/{max_retries} 失败")

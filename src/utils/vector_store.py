@@ -40,6 +40,9 @@ class VectorStore:
         # 初始化向量存储
         self.stores = self._init_stores()
         
+        # 确保所有存储都被正确设置为类属性
+        self.fix_stores()
+        
         logger.info(f"向量存储初始化完成，使用目录: {self.storage_dir}")
     
     def _init_stores(self) -> Dict[str, FAISS]:
@@ -66,11 +69,18 @@ class VectorStore:
                     stores[store_type] = self._create_new_store()
                     # 保存
                     stores[store_type].save_local(str(index_path))
-                    
+                
+                # 将存储设置为类属性，方便直接访问
+                setattr(self, store_type, stores[store_type])
+                logger.info(f"成功初始化向量存储: {store_type}")
+                
             except Exception as e:
                 logger.error(f"初始化向量存储 {store_type} 失败: {str(e)}")
                 # 创建新的作为后备
                 stores[store_type] = self._create_new_store()
+                # 同样设置为类属性
+                setattr(self, store_type, stores[store_type])
+                logger.info(f"使用新创建的向量存储作为后备: {store_type}")
                 
         return stores
         
@@ -93,7 +103,7 @@ class VectorStore:
         """添加文本到向量存储
         
         Args:
-            texts: 要添加的文本列表
+            texts: 文本列表
             metadatas: 元数据列表
             store_type: 存储类型
             
@@ -102,30 +112,21 @@ class VectorStore:
         """
         if not texts:
             return []
-                
+            
         store = self.stores.get(store_type)
         if not store:
-            raise ValueError(f"未找到向量存储: {store_type}")
+            logger.warning(f"存储类型 {store_type} 未初始化")
+            return []
             
-        # 获取嵌入向量
-        embeddings = await self._get_embeddings_batch(texts)
-        
-        # 添加到向量存储
         try:
-            ids = store.add_embeddings(
-                text_embeddings=list(zip(texts, embeddings)),
-                metadatas=metadatas
-            )
-            
-            # 保存更新后的索引
-            store.save_local(str(self.storage_dir / store_type))
-            
-            return ids
-            
+            logger.debug(f"添加 {len(texts)} 个文本到向量存储，类型: {store_type}")
+            doc_ids = store.add_texts(texts, metadatas)
+            logger.debug(f"成功添加文本，返回 {len(doc_ids)} 个文档ID")
+            return doc_ids
         except Exception as e:
             logger.error(f"添加文本到向量存储失败: {str(e)}")
             raise
-            
+                
     async def similarity_search(
         self, 
         query: str, 
@@ -133,39 +134,38 @@ class VectorStore:
         store_type: str = "contexts",
         threshold: float = 0.7
     ) -> List[Dict[str, Any]]:
-        """使用ANN进行相似度搜索
+        """向量相似度搜索
         
         Args:
             query: 查询文本
-            top_k: 返回结果数量
+            top_k: 返回的最大结果数
             store_type: 存储类型
             threshold: 相似度阈值
             
         Returns:
-            List[Dict[str, Any]]: 搜索结果列表
+            List[Dict[str, Any]]: 搜索结果
         """
-        with performance_monitor.measure_time(
-            "vector_search", 
-            query=query,
-            store_type=store_type
-        ):
-            store = self.stores.get(store_type)
-            if not store:
-                raise ValueError(f"未找到向量存储: {store_type}")
-                
-            # 获取查询向量
+        store = self.stores.get(store_type)
+        if not store:
+            logger.warning(f"存储类型 {store_type} 未初始化")
+            return []
+            
+        try:
+            # 获取查询文本的嵌入向量
             query_embedding = await self._get_embedding(query)
             
-            # 使用FAISS的ANN搜索
-            docs_and_scores = store.similarity_search_with_score_by_vector(
-                embedding=query_embedding,
+            # 使用FAISS进行相似度搜索
+            docs_with_scores = store.similarity_search_with_score(
+                query_embedding,
                 k=top_k
             )
             
+            # 处理结果
             results = []
-            for doc, score in docs_and_scores:
-                # 转换余弦相似度到0-1范围
-                similarity = 1 - score / 2
+            for doc, score in docs_with_scores:
+                # 计算余弦相似度 (FAISS返回的是欧氏距离，转换为相似度)
+                # 欧氏距离转相似度的简化公式: similarity = 1 / (1 + distance)
+                similarity = 1 / (1 + score)
                 
                 if similarity >= threshold:
                     results.append({
@@ -173,11 +173,12 @@ class VectorStore:
                         'metadata': doc.metadata,
                         'similarity': similarity
                     })
-            
-            # 更新性能监控的结果数量
-            performance_monitor.metrics["vector_search"][-1]["result_count"] = len(results)
-                
+                    
             return results
+            
+        except Exception as e:
+            logger.error(f"向量相似度搜索失败: {str(e)}")
+            return []
             
     async def _get_embedding(self, text: str) -> List[float]:
         """获取文本的嵌入向量
@@ -197,7 +198,7 @@ class VectorStore:
         except Exception as e:
             logger.error(f"获取文本嵌入向量失败: {str(e)}")
             raise
-
+            
     async def _get_embeddings_batch(
         self,
         texts: List[str],
@@ -225,49 +226,85 @@ class VectorStore:
             except Exception as e:
                 logger.error(f"批量获取嵌入向量失败: {str(e)}")
                 raise
-
+    
         return embeddings
-
+        
     def is_initialized(self) -> bool:
         """检查向量存储是否已初始化
         
         Returns:
-            bool: 向量存储是否已初始化
+            bool: 是否已初始化
         """
-        return hasattr(self, 'stores') and bool(self.stores)
+        return hasattr(self, 'stores') and self.stores is not None and len(self.stores) > 0
         
     def is_ready(self) -> bool:
-        """检查向量存储是否就绪，可以处理请求
+        """检查向量存储是否就绪
         
         Returns:
-            bool: 向量存储是否就绪
+            bool: 是否就绪
         """
-        # 检查是否已初始化并且stores中至少有一个store可用
         if not self.is_initialized():
             return False
             
-        # 检查是否至少有一个存储类型可用
-        for store_type in self.stores:
-            if self.stores[store_type] is not None:
-                return True
-                
-        return False
+        # 检查关键存储是否已初始化
+        required_stores = ['contexts', 'templates', 'prompts']
         
-    def get_initialization_error(self) -> str:
-        """获取初始化过程中的错误信息
+        # 检查是否有缺少的存储
+        missing_stores = []
+        for store_name in required_stores:
+            if not hasattr(self, store_name) or getattr(self, store_name) is None:
+                missing_stores.append(store_name)
+                
+        # 如果有缺少的存储，尝试修复
+        if missing_stores:
+            logger.warning(f"缺少存储: {', '.join(missing_stores)}，尝试修复")
+            self.fix_stores()
+            
+            # 再次检查是否已修复
+            for store_name in missing_stores:
+                if not hasattr(self, store_name) or getattr(self, store_name) is None:
+                    return False
+        
+        # 检查嵌入模型是否可用
+        if not hasattr(self, 'embeddings') or self.embeddings is None:
+            return False
+            
+        return True
+        
+    def get_initialization_error(self) -> Optional[str]:
+        """获取初始化错误信息
         
         Returns:
-            str: 错误信息
+            Optional[str]: 错误信息，如果没有错误则返回None
         """
         if not hasattr(self, 'stores'):
-            return "向量存储未正确初始化"
-        if not self.stores:
+            return "向量存储未初始化"
+            
+        if self.stores is None:
             return "向量存储为空"
-        return ""
+            
+        if len(self.stores) == 0:
+            return "未创建任何向量存储"
+            
+        # 检查各个存储
+        missing_stores = []
+        required_stores = ['contexts', 'templates', 'prompts']
+        for store_name in required_stores:
+            if not hasattr(self, store_name) or getattr(self, store_name) is None:
+                missing_stores.append(store_name)
+                
+        if missing_stores:
+            return f"缺少存储: {', '.join(missing_stores)}"
+            
+        # 检查嵌入模型
+        if not hasattr(self, 'embeddings') or self.embeddings is None:
+            return "嵌入模型未初始化"
+            
+        return None
         
     async def get_store_stats(self) -> Dict[str, Dict[str, Any]]:
         """获取各存储的统计信息
-        
+            
         Returns:
             Dict[str, Dict[str, Any]]: 各存储的统计信息
         """
@@ -328,7 +365,7 @@ class VectorStore:
                 return True
             await asyncio.sleep(0.5)
         return False
-        
+                
     def optimize_index(self, store_type: str = "contexts"):
         """优化向量索引
         
@@ -369,7 +406,7 @@ class VectorStore:
         except Exception as e:
             logger.error(f"优化向量索引失败: {str(e)}")
             raise
-            
+        
     async def get_relevant_context(
         self,
         query: str,
@@ -484,7 +521,7 @@ class VectorStore:
             else:
                 logger.warning("添加prompt未返回文档ID")
                 return None
-                
+            
         except Exception as e:
             logger.error(f"添加prompt到向量存储失败: {str(e)}")
             if settings.DEBUG:
@@ -525,7 +562,7 @@ class VectorStore:
         except Exception as e:
             logger.error(f"记录prompt历史失败: {str(e)}")
             return False
-            
+        
     async def add_content(
         self,
         content: str,
@@ -549,7 +586,7 @@ class VectorStore:
                 metadatas=[metadata] if metadata else None,
                 store_type=content_type
             )
-            
+                
             if doc_ids and len(doc_ids) > 0:
                 logger.info(f"成功添加内容到向量存储，ID: {doc_ids[0]}")
                 return doc_ids[0]
@@ -561,4 +598,87 @@ class VectorStore:
             logger.error(f"添加内容到向量存储失败: {str(e)}")
             if settings.DEBUG:
                 logger.debug("详细错误信息:", exc_info=True)
-            return None 
+            return None
+        
+    def fix_stores(self) -> None:
+        """修复存储属性，确保所有存储已正确设置为类的属性"""
+        if not hasattr(self, 'stores') or not self.stores:
+            logger.warning("存储字典未初始化，尝试重新初始化")
+            self.stores = self._init_stores()
+            return
+            
+        # 检查必要的存储类型
+        store_types = ['contexts', 'templates', 'prompts']
+        for store_type in store_types:
+            # 如果存储类型在字典中存在但未设置为类属性
+            if store_type in self.stores and not hasattr(self, store_type):
+                logger.info(f"发现未设置的存储属性: {store_type}，正在修复")
+                setattr(self, store_type, self.stores[store_type])
+            # 如果存储类型在字典中不存在
+            elif store_type not in self.stores:
+                logger.warning(f"存储字典中缺少存储类型: {store_type}，创建新存储")
+                new_store = self._create_new_store()
+                self.stores[store_type] = new_store
+                setattr(self, store_type, new_store)
+                
+                # 保存新创建的存储
+                try:
+                    new_store.save_local(str(self.storage_dir / store_type))
+                    logger.info(f"新创建的存储已保存: {store_type}")
+                except Exception as e:
+                    logger.error(f"保存新创建的存储失败: {store_type}, 错误: {str(e)}")
+        
+        logger.info("已修复所有存储属性")
+        
+    def ensure_store_attributes(self) -> bool:
+        """确保所有存储都可以直接从实例访问，作为最后的补救方法
+        
+        Returns:
+            bool: 是否成功确保所有属性
+        """
+        if not hasattr(self, 'stores') or not self.stores:
+            logger.error("stores字典不存在或为空，无法确保属性")
+            return False
+            
+        required_stores = ['contexts', 'templates', 'prompts']
+        
+        # 先尝试常规方法
+        self.fix_stores()
+        
+        # 检查是否有未设置的存储属性
+        missing_attributes = []
+        for store_name in required_stores:
+            if not hasattr(self, store_name) or getattr(self, store_name) is None:
+                missing_attributes.append(store_name)
+        
+        if not missing_attributes:
+            logger.info("所有存储属性已设置")
+            return True
+            
+        # 对于仍然缺少的属性，采取紧急措施
+        for store_name in missing_attributes:
+            if store_name in self.stores:
+                # 再次尝试设置属性
+                logger.warning(f"尝试强制设置属性: {store_name}")
+                setattr(self, store_name, self.stores[store_name])
+            else:
+                # 如果stores中也没有这个存储，创建一个新的
+                logger.warning(f"创建新的存储并设置属性: {store_name}")
+                new_store = self._create_new_store()
+                self.stores[store_name] = new_store
+                setattr(self, store_name, new_store)
+                
+                # 尝试保存
+                try:
+                    new_store.save_local(str(self.storage_dir / store_name))
+                except Exception as e:
+                    logger.error(f"保存新创建的存储失败: {store_name}, 错误: {str(e)}")
+        
+        # 最终检查
+        for store_name in required_stores:
+            if not hasattr(self, store_name) or getattr(self, store_name) is None:
+                logger.error(f"属性设置失败: {store_name}")
+                return False
+                
+        logger.info("已确保所有存储属性可以直接访问")
+        return True 

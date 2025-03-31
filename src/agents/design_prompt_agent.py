@@ -11,6 +11,13 @@ import asyncio
 import importlib
 import inspect
 import re
+import traceback
+import base64
+import io
+from pydantic import BaseModel
+from enum import Enum
+from openai import OpenAI
+import imghdr
 
 # 创建 logger
 logger = logging.getLogger(__name__)
@@ -27,7 +34,6 @@ except ImportError:
 
 from langchain_openai import ChatOpenAI
 from langchain_core.language_models import BaseChatModel
-from openai import OpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnablePassthrough, Runnable
@@ -37,10 +43,13 @@ from langchain.schema import Document
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
-from src.utils.vector_store import VectorStore
-from src.utils.design_image_processor import DesignImageProcessor
-from src.templates.tech_stack_templates import TECH_STACK_SYSTEM_PROMPTS, TECH_STACK_OPTIMIZATION_TEMPLATES
+# 导入配置
 from config.config import settings
+
+# 推迟可能导致循环引用的导入
+# from src.utils.vector_store import VectorStore
+# from src.utils.design_image_processor import DesignImageProcessor
+from src.templates.tech_stack_templates import TECH_STACK_SYSTEM_PROMPTS, TECH_STACK_OPTIMIZATION_TEMPLATES
 
 # 检测 langgraph 版本
 try:
@@ -95,43 +104,101 @@ class DesignPromptState(TypedDict):
     tech_stack_components: Optional[List[Dict[str, Any]]]  # 技术栈特定组件
     evaluation_result: Optional[Dict[str, Any]]  # 评估结果
     project_analysis: Optional[Dict[str, Any]]  # 项目分析结果
+    design_image_base64: Optional[str]  # 设计图的base64编码
+    design_analysis_raw: Optional[Dict[str, Any]]  # 设计图分析结果的原始数据
+
+# ResponseStatus枚举
+class ResponseStatus(str, Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    PENDING = "pending"
+
+# 请求类定义
+class DesignPromptRequest(BaseModel):
+    """设计图提示词生成请求"""
+    tech_stack: str
+    tech_stack_components: Optional[List[Dict[str, Any]]] = None
+    project_id: Optional[str] = None
+    agent_type: Optional[str] = None
+    rag_method: Optional[str] = None
+    retriever_top_k: Optional[int] = None
+    temperature: Optional[float] = None
+    context_window_size: Optional[int] = None
+    skip_cache: bool = False
+
+# 响应类定义
+class DesignPromptResponse(BaseModel):
+    """设计图提示词生成响应"""
+    status: ResponseStatus = ResponseStatus.PENDING
+    message: str = ""
+    prompt: str = ""
+    design_analysis: str = ""
+    project_analysis: str = ""
+    similar_designs: str = ""
+    tech_stack: Optional[str] = None
+    processing_time: Optional[float] = None
+    
+    class Config:
+        """配置"""
+        use_enum_values = True  # 确保枚举值序列化为字符串
+        
+        schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "成功生成设计图Prompt",
+                "prompt": "基于上传的UI设计图，创建一个Android应用...",
+                "design_analysis": "## 设计概述\n这是一个现代化的移动应用界面...",
+                "project_analysis": "## 项目分析\n该项目使用MVVM架构...",
+                "similar_designs": "## 相似设计\n1. 电商应用首页...",
+                "tech_stack": "Android",
+                "processing_time": 3.5
+            }
+        }
 
 # 定义系统提示模板
 SYSTEM_PROMPT = """你是一个专业的设计图Prompt生成专家，擅长将设计图转换为详细的开发提示词。
 你的任务是根据用户上传的设计图和选择的技术栈({tech_stack})，生成一个详细的开发提示词。
 
-请遵循以下指南：
-1. 仔细分析设计图的UI元素、布局和交互
-2. 考虑{tech_stack}技术栈的特性和最佳实践
-3. 生成的提示词应包含：
-   - 设计图的详细描述
-   - UI组件的层次结构
-   - 布局和排版要求
-   - 交互和动画效果
-   - 技术实现建议
-   - 适配和响应式设计要求
+请仔细查看以下设计图和分析结果，这是开发提示词生成的核心依据：
 
-## 设计图分析结果
 {design_analysis}
 
-## 项目分析结果
+请基于项目分析结果，了解该项目的技术栈、组件和代码规范：
+
 {project_analysis}
 
-## 技术栈组件信息
+请充分利用下面的技术栈组件信息，确保开发提示词与现有技术架构兼容：
+
 {tech_stack_components}
 
-历史相似设计图的提示词可以作为参考，但请确保生成的提示词针对当前设计图的特点。
+请遵循以下指南生成提示词：
+1. 仔细分析设计图的UI元素、布局和交互特点
+2. 关注{tech_stack}技术栈的特性和最佳实践
+3. 优先使用项目分析中已有的组件和代码规范
+4. 提示词应包含以下内容：
+   - 设计图的详细描述和组织结构
+   - UI组件的层次结构和对应的{tech_stack}标准组件
+   - 具体的布局和排版要求（含尺寸、间距和对齐方式）
+   - 配色方案和设计风格（使用具体的色值）
+   - 交互和动画效果的具体实现方式
+   - 技术实现建议，优先使用项目已有组件
+   - 适配和响应式设计要求
+
+可参考以下历史相似设计图的提示词，但确保生成的提示词针对当前设计图的特点：
 
 ## 相似设计图提示词参考
 {similar_designs}
-"""
 
-# 请求类定义
-class GenerateDesignPromptRequest(TypedDict, total=False):
-    """设计提示词生成请求"""
-    design_image_id: str
-    tech_stack: str
-    user_feedback: Optional[str]
+请按照以下结构生成最终提示词：
+1. 设计概述：简要描述设计的整体风格和用途
+2. 布局结构：详细描述UI布局层次和组织方式
+3. UI组件：列出所有主要UI组件并说明对应的{tech_stack}标准组件
+4. 样式规范：详细说明颜色、字体、尺寸、间距等设计规范
+5. 交互行为：描述各组件的交互行为和动画效果
+6. 实现建议：提供具体的{tech_stack}技术实现建议，包括代码组织和架构模式
+7. 适配考虑：提供响应式设计和跨平台适配建议
+
+确保你的提示词非常详细、明确，并且紧密贴合设计图的实际内容。"""
 
 class DesignPromptAgent:
     """设计图Prompt生成Agent"""
@@ -167,94 +234,134 @@ class DesignPromptAgent:
             BaseChatModel: 初始化的LLM
         """
         try:
+            # 获取超时设置，默认30秒
+            timeout = settings.OPENAI_TIMEOUT
+            
             # 根据任务类型选择合适的模型和参数
             if task_type == "design_analysis":
                 return ChatOpenAI(
                     temperature=temperature or settings.VISION_MODEL_CONFIG["temperature"],
                     model=settings.VISION_MODEL,
-                    max_tokens=settings.VISION_MODEL_CONFIG["max_tokens"]
+                    max_tokens=settings.VISION_MODEL_CONFIG["max_tokens"],
+                    request_timeout=timeout
                 )
             elif task_type == "prompt_generation":
                 return ChatOpenAI(
                     temperature=temperature or settings.DESIGN_PROMPT_CONFIG["temperature"],
                     model=settings.DESIGN_PROMPT_CONFIG["model_name"],
-                    max_tokens=settings.DESIGN_PROMPT_CONFIG["max_tokens"]
+                    max_tokens=settings.DESIGN_PROMPT_CONFIG["max_tokens"],
+                    request_timeout=timeout
                 )
             elif task_type == "evaluation":
                 return ChatOpenAI(
                     temperature=temperature or 0.3,
                     model=settings.OPENAI_MODEL,
-                    max_tokens=2000
+                    max_tokens=2000,
+                    request_timeout=timeout
                 )
             else:
                 # 默认配置
                 return ChatOpenAI(
                     temperature=temperature or 0.7,
-                    model=settings.OPENAI_MODEL
+                    model=settings.OPENAI_MODEL,
+                    request_timeout=timeout
                 )
         except Exception as e:
             logger.error(f"初始化LLM失败: {str(e)}")
             # 回退到基本配置
-            return ChatOpenAI(
-                temperature=0.7,
-                model="gpt-3.5-turbo"
-            )
+            try:
+                return ChatOpenAI(
+                    temperature=0.7,
+                    model="gpt-3.5-turbo",
+                    request_timeout=30
+                )
+            except Exception as e2:
+                logger.error(f"回退到基础模型也失败: {str(e2)}")
+                # 返回一个自定义的模拟LLM，用于降级处理
+                return self._create_fallback_llm()
             
     def __init__(
         self,
-        vector_store: Optional[VectorStore] = None,
-        design_processor: Optional[DesignImageProcessor] = None,
+        vector_store: Optional[Any] = None,
+        design_processor: Optional[Any] = None,
         temperature: float = None,
-        max_tokens: int = None
+        max_tokens: int = None,
+        context_window_size: int = None,
+        skip_cache: bool = False
     ):
         """初始化设计图Prompt生成Agent
         
         Args:
-            vector_store: 向量存储对象
+            vector_store: 向量存储
             design_processor: 设计图处理器
             temperature: 温度
-            max_tokens: 最大Token数
+            max_tokens: 最大token数
+            context_window_size: 上下文窗口大小
+            skip_cache: 是否跳过缓存
         """
-        # 记录日志
-        logger.info("初始化设计图Prompt生成Agent")
-        logger.info(f"环境配置检查 - OPENAI_API_KEY: {'已设置' if settings.OPENAI_API_KEY else '未设置'}")
-        logger.info(f"环境配置检查 - DESIGN_PROMPT_MODEL: {settings.DESIGN_PROMPT_CONFIG['model_name'] or '未设置'}")
-        logger.info(f"环境配置检查 - OPENAI_BASE_URL: {settings.OPENAI_BASE_URL or '未设置'}")
-        
-        # 检查 langgraph 版本
-        self.langgraph_version = self._get_langgraph_version_info()
-        logger.info(f"LangGraph 版本: {self.langgraph_version}")
-        
-        # 初始化基本属性
-        self.vector_store = vector_store
-        self.design_processor = design_processor or DesignImageProcessor(vector_store)
-        self.temperature = temperature if temperature is not None else settings.DESIGN_PROMPT_CONFIG["temperature"]
-        self.max_tokens = max_tokens if max_tokens is not None else settings.DESIGN_PROMPT_CONFIG["max_tokens"]
-        
-        # 初始化提示词缓存文件路径
-        if DesignPromptAgent._prompt_cache_file is None:
-            DesignPromptAgent._prompt_cache_file = Path(settings.DATA_DIR) / "design_prompt_cache.json"
-            logger.info(f"设置提示词缓存文件路径: {DesignPromptAgent._prompt_cache_file}")
+        try:
+            # 设置模型默认参数
+            self.temperature = temperature or settings.DESIGN_PROMPT_CONFIG["temperature"]
+            self.max_tokens = max_tokens or settings.DESIGN_PROMPT_CONFIG["max_tokens"]
+            self.context_window_size = context_window_size or settings.DESIGN_PROMPT_CONFIG.get("default_context_window_size", 4096)
+            self.skip_cache = skip_cache
             
-        # 加载缓存
-        self._load_prompt_cache()
-        
-        # 初始化工作流
-        self.workflow = self._build_workflow()
+            # 初始化服务
+            self.vector_store = vector_store
+            if not self.vector_store:
+                from src.utils.vector_store import VectorStore
+                self.vector_store = VectorStore()
+                
+            # 初始化设计图处理器
+            self.design_processor = design_processor
+            if not self.design_processor:
+                from src.utils.design_image_processor import DesignImageProcessor
+                self.design_processor = DesignImageProcessor(vector_store=self.vector_store)
+                
+            # 初始化状态
+            self.state = {}
+            self._init_state("")
+            
+            # 初始化缓存
+            self._prompt_cache_file = settings.DESIGN_PROMPT_CONFIG.get(
+                "prompt_cache_file", 
+                os.path.join(settings.DATA_DIR, "design_prompt_cache.json")
+            )
+            self._load_prompt_cache()
+            
+            # 初始化工作流
+            self.workflow = None
+            
+            # 初始化LLM
+            self.llm = self._initialize_llm(temperature=self.temperature)
+            
+            logger.info("设计图Prompt生成Agent初始化成功")
+        except Exception as e:
+            logger.error(f"设计图Prompt生成Agent初始化失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise e
     
     def _load_prompt_cache(self) -> None:
         """加载提示词缓存"""
         try:
-            if DesignPromptAgent._prompt_cache_file.exists():
-                with open(DesignPromptAgent._prompt_cache_file, "r", encoding="utf-8") as f:
-                    DesignPromptAgent._prompt_cache = json.load(f)
-                logger.info(f"已加载提示词缓存: {len(DesignPromptAgent._prompt_cache)}条记录")
+            if self._prompt_cache_file is None:
+                # 如果缓存文件路径未设置，则在DATA_DIR中创建
+                from config.config import settings
+                cache_dir = Path(settings.DATA_DIR)
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                self._prompt_cache_file = cache_dir / "design_prompt_cache.json"
+                logger.info(f"设置提示词缓存文件路径: {self._prompt_cache_file}")
+            
+            if self._prompt_cache_file.exists():
+                with open(self._prompt_cache_file, "r", encoding="utf-8") as f:
+                    self._prompt_cache = json.load(f)
+                logger.info(f"已加载提示词缓存: {len(self._prompt_cache)}个记录")
             else:
-                logger.info("提示词缓存文件不存在，将创建新缓存")
-                DesignPromptAgent._prompt_cache = {}
+                logger.info(f"未找到提示词缓存文件: {self._prompt_cache_file}")
+                self._prompt_cache = {}
         except Exception as e:
             logger.error(f"加载提示词缓存失败: {str(e)}")
-            DesignPromptAgent._prompt_cache = {}
+            self._prompt_cache = {}
     
     def _build_workflow(self) -> StateGraph:
         """构建工作流
@@ -338,189 +445,133 @@ class DesignPromptAgent:
             # 错误处理...
             return state
     
-    async def _analyze_design(self, state: DesignPromptState) -> DesignPromptState:
+    async def _analyze_design(self, design_image_id: str) -> Optional[Dict[str, Any]]:
         """分析设计图
-        
+
         Args:
-            state: 当前状态
-            
+            design_image_id: 设计图ID或base64数据
+
         Returns:
-            DesignPromptState: 更新后的状态
+            Optional[Dict[str, Any]]: 分析结果
         """
-        design_image_id = state.get("design_image_id")
-        tech_stack = state.get("tech_stack")
-        
         try:
-            logger.info(f"开始分析设计图: {design_image_id}")
+            logger.info(f"分析设计图: {design_image_id[:30]}...")
+            if not design_image_id:
+                logger.error("设计图ID为空")
+                return {
+                    "status": "error",
+                    "error": "空ID",
+                    "error_message": "设计图ID为空",
+                    "summary": "无法分析设计图，因为未提供有效的ID或数据。"
+                }
             
-            if not self.design_processor:
-                logger.error("设计图处理器未初始化")
-                state["design_analysis"] = "设计图处理器未初始化，无法分析设计图"
-                state["next_step"] = "retrieve_history_prompts"
-                return state
-                
-            # 添加文件位置搜索并确保能找到设计图
-            try:
-                # 获取设计图路径
-                image_path = self.design_processor._get_design_image_path(design_image_id)
-                logger.info(f"设计图路径: {image_path}")
-                state["design_image_path"] = str(image_path)
-                
-                # 检查图片文件是否存在
-                if not os.path.exists(image_path):
-                    logger.error(f"设计图文件不存在: {image_path}")
-                    
-                    # 尝试在uploads目录中找到任何匹配的文件
-                    upload_dir = Path(self.design_processor.upload_dir)
-                    alt_files = list(upload_dir.glob(f"{design_image_id}*"))
-                    if alt_files:
-                        image_path = str(alt_files[0])
-                        logger.info(f"找到替代文件: {image_path}")
-                        state["design_image_path"] = image_path
-                    else:
-                        state["design_analysis"] = f"设计图文件不存在: {image_path}。请重新上传设计图"
-                        state["next_step"] = "retrieve_history_prompts"
-                        return state
-            except Exception as e:
-                logger.error(f"获取设计图路径失败: {str(e)}")
-                state["design_analysis"] = f"获取设计图路径失败: {str(e)}"
-                state["next_step"] = "retrieve_history_prompts"
-                return state
-                
-            # 确保能读取图片文件
-            try:
-                with open(image_path, "rb") as f:
-                    image_data = f.read()
-                logger.info(f"成功读取设计图文件: {image_path}, 大小: {len(image_data)} 字节")
-            except Exception as e:
-                logger.error(f"读取设计图文件失败: {str(e)}")
-                state["design_analysis"] = f"读取设计图文件失败: {str(e)}"
-                state["next_step"] = "retrieve_history_prompts"
-                return state
-                
-            # 尝试验证图片格式
-            try:
-                from PIL import Image
-                import io
-                img = Image.open(io.BytesIO(image_data))
-                logger.info(f"图片格式: {img.format}, 尺寸: {img.size}, 模式: {img.mode}")
-                
-                # 保存验证后的图片，确保它可以被正确打开
-                validated_path = os.path.join(os.path.dirname(image_path), f"validated_{os.path.basename(image_path)}")
-                img.save(validated_path)
-                logger.info(f"验证后的图片已保存到: {validated_path}")
-                
-                # 使用验证后的图片路径
-                image_path = validated_path
-                state["design_image_path"] = str(image_path)
-            except Exception as e:
-                logger.warning(f"验证图片格式失败: {str(e)}")
-                # 继续处理，不中断流程
-                
-            # 分析设计图
-            logger.info(f"调用analyze_design_image分析设计图: {image_path}, 技术栈: {tech_stack}")
-            analysis_result = await self.design_processor.analyze_design_image(image_path, tech_stack)
+            # 如果design_image_id是base64数据
+            if design_image_id.startswith('data:image'):
+                logger.info("使用base64数据进行分析")
+                # 保存base64数据到state中以供后续使用
+                if self.state:
+                    self.state["design_image_base64"] = design_image_id
+                tech_stack = self.state.get("tech_stack", "Android") if self.state else "Android"
+                analysis_result = await self.design_processor.analyze_design_image(design_image_id, tech_stack)
+                return analysis_result
             
+            # 获取设计图路径
+            design_image_path = await self._get_design_image_path(design_image_id)
+            if not design_image_path or not os.path.exists(design_image_path):
+                logger.error(f"设计图路径无效或不存在: {design_image_path}")
+                
+                # 尝试将design_image_id当作base64数据处理
+                if len(design_image_id) > 100 and ',' in design_image_id:
+                    logger.info("尝试将ID作为base64数据处理")
+                    # 保存base64数据到state中以供后续使用
+                    if self.state:
+                        self.state["design_image_base64"] = design_image_id
+                    tech_stack = self.state.get("tech_stack", "Android") if self.state else "Android"
+                    analysis_result = await self.design_processor.analyze_design_image(design_image_id, tech_stack)
+                    return analysis_result
+                
+                # 返回错误响应
+                return {
+                    "status": "error",
+                    "error": "文件不存在",
+                    "error_message": f"设计图文件不存在: {design_image_path or design_image_id}",
+                    "summary": "无法找到指定的设计图文件，请确认文件ID是否正确。"
+                }
+            
+            # 获取技术栈
+            tech_stack = self.state.get("tech_stack", "Android") if self.state else "Android"
+            logger.info(f"使用技术栈 {tech_stack} 分析设计图: {design_image_path}")
+            
+            # 调用设计图处理器分析设计图
+            analysis_result = await self.design_processor.analyze_design_image(design_image_path, tech_stack)
             if not analysis_result:
-                logger.warning(f"analyze_design_image返回空结果: {design_image_id}")
-                state["design_analysis"] = "分析设计图失败，请检查设计图是否有效"
-                state["next_step"] = "retrieve_history_prompts"
-                return state
-                
-            # 检查分析结果状态
-            status = analysis_result.get("status")
-            if status == "error":
-                logger.warning(f"设计图分析返回错误: {analysis_result.get('message')}")
-                state["design_analysis"] = f"分析设计图出错: {analysis_result.get('message')}"
-                state["next_step"] = "retrieve_history_prompts"
-                return state
-                
-            # 获取分析内容
-            analysis_content = analysis_result.get("analysis")
-            if not analysis_content or len(analysis_content) < 50:
-                logger.warning(f"分析设计图返回内容过短 ({len(analysis_content) if analysis_content else 0} 字符)")
-                state["design_analysis"] = "分析设计图返回内容不足，请检查设计图是否有效"
-                state["next_step"] = "retrieve_history_prompts"
-                return state
-                
-            # 格式化分析结果
-            formatted_analysis = self._format_design_analysis(analysis_result)
-            state["design_analysis"] = formatted_analysis
-            logger.info(f"设计图分析完成: {design_image_id}, 分析结果长度: {len(formatted_analysis)} 字符")
+                logger.error(f"分析设计图失败，结果为空: {design_image_path}")
+                return {
+                    "status": "error",
+                    "error": "分析失败",
+                    "error_message": "设计图处理器返回空结果",
+                    "summary": "设计图分析过程中出现错误，无法获取分析结果。"
+                }
             
-            # 设置下一步为检索历史提示词
-            state["next_step"] = "retrieve_history_prompts"
-            return state
+            logger.info("设计图分析完成")
             
+            # 读取图像文件并转换为base64（如果结果中没有image_base64）
+            if not analysis_result.get("image_base64") and os.path.exists(design_image_path):
+                try:
+                    import base64
+                    with open(design_image_path, "rb") as image_file:
+                        image_data = image_file.read()
+                        image_type = os.path.splitext(design_image_path)[1][1:].lower()
+                        if not image_type or image_type not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
+                            image_type = 'png'
+                        base64_data = base64.b64encode(image_data).decode('utf-8')
+                        analysis_result["image_base64"] = f"data:image/{image_type};base64,{base64_data}"
+                        
+                        # 保存base64数据到state中以供后续使用
+                        if self.state:
+                            self.state["design_image_base64"] = analysis_result["image_base64"]
+                            logger.info("已将图像base64数据保存到state中")
+                except Exception as e:
+                    logger.warning(f"读取图像文件并转换为base64时出错: {str(e)}")
+            
+            return analysis_result
         except Exception as e:
-            logger.error(f"分析设计图失败: {str(e)}", exc_info=True)
-            state["design_analysis"] = f"分析设计图时出错: {str(e)}"
-            state["next_step"] = "retrieve_history_prompts"
-            return state
+            logger.error(f"分析设计图时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                "status": "error",
+                "error": "分析异常",
+                "error_message": str(e),
+                "summary": "在分析设计图过程中发生异常，无法完成分析。"
+            }
     
-    def _format_design_analysis(self, analysis: Dict[str, Any]) -> str:
-        """格式化设计分析结果
+    def _format_similar_designs(self, design_analysis: Optional[Dict[str, Any]]) -> str:
+        """格式化相似设计提示词"""
+        if not self.state.get("similar_designs"):
+            return "没有找到相似的设计图。"
         
-        Args:
-            analysis: 设计分析结果
-            
-        Returns:
-            str: 格式化后的设计分析结果
-        """
         try:
-            # 提取关键信息
-            elements = analysis.get("elements", [])
-            colors = analysis.get("colors", [])
-            fonts = analysis.get("fonts", [])
-            layout = analysis.get("layout", {})
-            summary = analysis.get("summary", "无摘要")
+            formatted_result = ""
+            similar_designs = self.state["similar_designs"]
             
-            # 格式化元素
-            elements_text = ""
-            for i, element in enumerate(elements[:10]):  # 限制显示前10个元素
-                element_type = element.get("type", "未知类型")
-                element_name = element.get("name", f"元素{i+1}")
-                element_desc = element.get("description", "无描述")
-                elements_text += f"- {element_name} ({element_type}): {element_desc}\n"
+            for idx, design in enumerate(similar_designs[:3], 1):  # 限制显示前3个相似设计
+                prompt = design.get("prompt", "")
+                tech_stack = design.get("tech_stack", "未知技术栈")
+                
+                if prompt:
+                    # 截取提示词（避免过长）
+                    if len(prompt) > 500:
+                        prompt = prompt[:500] + "...(省略部分内容)"
+                    
+                    formatted_result += f"### 相似设计 {idx} (技术栈: {tech_stack})\n"
+                    formatted_result += f"{prompt}\n\n"
             
-            # 格式化颜色
-            colors_text = ""
-            for i, color in enumerate(colors[:5]):  # 限制显示前5个颜色
-                hex_code = color.get("hex", "#000000")
-                color_name = color.get("name", f"颜色{i+1}")
-                colors_text += f"- {color_name}: {hex_code}\n"
-            
-            # 格式化字体
-            fonts_text = ""
-            for i, font in enumerate(fonts[:3]):  # 限制显示前3个字体
-                font_name = font.get("name", f"字体{i+1}")
-                font_style = font.get("style", "常规")
-                fonts_text += f"- {font_name} ({font_style})\n"
-            
-            # 组合结果
-            result = f"""## 设计分析结果
-### 摘要
-{summary}
-
-### 元素 (前10个)
-{elements_text if elements_text else "未检测到元素"}
-
-### 颜色 (前5个)
-{colors_text if colors_text else "未检测到颜色"}
-
-### 字体 (前3个)
-{fonts_text if fonts_text else "未检测到字体"}
-
-### 布局信息
-- 结构: {layout.get("structure", "未检测到布局结构")}
-- 对齐方式: {layout.get("alignment", "未检测到对齐方式")}
-- 间距: {layout.get("spacing", "未检测到间距信息")}
-"""
-            return result
-            
+            return formatted_result or "没有找到相似的设计图提示词。"
+        
         except Exception as e:
-            logger.error(f"格式化设计分析结果失败: {str(e)}")
-            return f"设计分析结果格式化失败: {str(e)}"
+            logger.error(f"格式化相似设计失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            return "相似设计格式化失败。"
     
     async def _retrieve_history_prompts(self, state: DesignPromptState) -> DesignPromptState:
         """检索历史提示词
@@ -540,7 +591,7 @@ class DesignPromptAgent:
         except Exception as e:
             # 错误处理...
             return state
-    
+                    
     async def _extract_tech_stack_components(self, state: DesignPromptState) -> DesignPromptState:
         """提取技术栈特定组件
         
@@ -606,426 +657,982 @@ class DesignPromptAgent:
             state["next_step"] = "generate_prompt"
             return state
     
-    async def _generate_prompt(self, state: DesignPromptState) -> DesignPromptState:
-        """生成提示词
+    async def _analyze_project(
+        self, 
+        project_id: str, 
+        tech_stack: str, 
+        tech_stack_components: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """分析项目代码
         
         Args:
-            state: 当前状态
+            project_id: 项目ID
+            tech_stack: 技术栈
+            tech_stack_components: 技术栈组件
             
         Returns:
-            DesignPromptState: 更新后的状态
+            Dict[str, Any]: 项目分析结果
         """
-        # 生成缓存键
-        design_id = state["design_image_id"]
-        tech_stack = state["tech_stack"]
-        cache_key = f"{design_id}_{tech_stack}"
-        
-        # 如果不跳过缓存，尝试从缓存中获取
-        if not state.get("skip_cache", False) and cache_key in DesignPromptAgent._prompt_cache:
-            cached_data = DesignPromptAgent._prompt_cache[cache_key]
-            # 检查缓存是否过期
-            if time.time() - cached_data.get("timestamp", 0) < DesignPromptAgent._cache_expiry:
-                logger.info(f"使用缓存的提示词: {cache_key}")
-                state["generated_prompt"] = cached_data["prompt"]
-                state["next_step"] = "end"
-                return state
-        
-        logger.info(f"开始生成提示词: 设计图ID={design_id}, 技术栈={tech_stack}")
-        
-        try:
-            # 准备基础模板
-            if tech_stack in TECH_STACK_SYSTEM_PROMPTS:
-                system_template = TECH_STACK_SYSTEM_PROMPTS[tech_stack]
-                logger.info(f"使用特定技术栈模板: {tech_stack}")
-            else:
-                system_template = SYSTEM_PROMPT
-                logger.info("使用默认系统提示模板")
+        if not project_id:
+            logger.info("未提供项目ID，跳过项目分析")
+            return None
             
-            # 准备上下文信息
-            similar_designs_text = ""
-            for i, design in enumerate(state.get("similar_designs", [])[:3]):
-                prompt = design.get("prompt", "")
-                if len(prompt) > 300:
-                    prompt = prompt[:300] + "..."
-                similar_designs_text += f"示例{i+1}: {prompt}\n\n"
-                
-            if not similar_designs_text:
-                similar_designs_text = "没有相似设计图提示词"
-                
-            # 技术栈组件信息
-            tech_stack_components = state.get("tech_stack_components", [])
-            tech_stack_components_text = ""
-            if tech_stack_components:
-                tech_stack_components_text = "技术栈组件:\n"
-                for component in tech_stack_components[:5]:
-                    tech_stack_components_text += f"- {component.get('name', '')}: {component.get('description', '')}\n"
-            
-            # 获取设计分析结果
-            design_analysis = state.get("design_analysis", "")
-            if not design_analysis:
-                design_analysis = "设计分析未完成或失败"
-                
-            # 获取项目分析结果
-            project_analysis = state.get("project_analysis")
-            project_analysis_text = ""
-            if project_analysis and isinstance(project_analysis, dict):
-                if project_analysis.get("status") == "success":
-                    project_analysis_text = "## 项目分析信息:\n"
-                    # 添加技术栈信息
-                    tech_stack_info = project_analysis.get("tech_stack", {})
-                    if tech_stack_info:
-                        project_analysis_text += "- 技术栈:\n"
-                        for tech_type, techs in tech_stack_info.items():
-                            project_analysis_text += f"  - {tech_type}: {', '.join(techs)}\n"
-                        
-                        # 添加组件信息
-                        components = project_analysis.get("components", {})
-                        if components:
-                            project_analysis_text += "- 组件:\n"
-                            for comp_type, comps in components.items():
-                                project_analysis_text += f"  - {comp_type}: {', '.join(comps[:5])}\n"
-                        
-                        # 添加摘要
-                        summary = project_analysis.get("summary")
-                        if summary:
-                            project_analysis_text += f"- 摘要: {summary}\n"
-            
-            # 准备提示词生成输入
-            context = {
-                "tech_stack": tech_stack,
-                "similar_designs": similar_designs_text,
-                "design_analysis": design_analysis,
-                "tech_stack_components": tech_stack_components_text,
-                "project_analysis": project_analysis_text
-            }
-            
-            # 使用LLM生成提示词
-            llm = self._initialize_llm("prompt_generation", state.get("temperature"))
-            
-            # 准备系统提示
-            formatted_system_prompt = system_template.format(**context)
-            
-            messages = [
-                SystemMessage(content=formatted_system_prompt),
-                HumanMessage(content=f"请为这个{tech_stack}技术栈的设计图生成一个详细的开发提示词。确保提示词考虑了设计图的特点和技术栈的要求。")
-            ]
-            
-            # 替换ainvoke调用，改用当前支持的API方法
-            try:
-                # 使用invoke方法替代ainvoke
-                logger.info("使用invoke方法调用LLM")
-                response = await asyncio.to_thread(llm.invoke, messages)
-            except AttributeError:
-                # 旧版本langchain可能使用__call__方法
-                logger.info("尝试使用__call__方法调用LLM")
-                response = await asyncio.to_thread(llm, messages)
-                
-            generated_prompt = response.content
-            
-            # 检查是否成功生成
-            if not generated_prompt or len(generated_prompt) < 50:
-                logger.warning(f"生成的提示词过短或为空: {generated_prompt}")
-                generated_prompt = f"提示词生成失败。请检查设计图是否有效，或者尝试不同的技术栈。\n\n设计分析结果: {design_analysis}"
-            
-            # 更新状态
-            state["generated_prompt"] = generated_prompt
-            state["next_step"] = "end"
-            
-            # 存入缓存
-            if not state.get("skip_cache", False):
-                DesignPromptAgent._prompt_cache[cache_key] = {
-                    "prompt": generated_prompt,
-                    "timestamp": time.time()
-                }
-                # 保存缓存
-                self._save_prompt_cache()
-                
-            logger.info(f"提示词生成完成: 字符数={len(generated_prompt)}")
-            return state
-            
-        except Exception as e:
-            logger.error(f"生成提示词失败: {str(e)}", exc_info=True)
-            state["generated_prompt"] = f"生成提示词时出错: {str(e)}"
-            state["next_step"] = "end"
-            return state
-    
-    async def _evaluate_prompt(self, state: DesignPromptState) -> DesignPromptState:
-        """评估生成的提示词
-        
-        Args:
-            state: Agent状态
-            
-        Returns:
-            DesignPromptState: 更新后的状态
-        """
-        try:
-            # 获取评估配置
-            evaluation_dimensions = settings.DESIGN_PROMPT_CONFIG.get("evaluation_dimensions", [])
-            if not evaluation_dimensions:
-                logger.warning("未配置评估维度，跳过评估")
-                state["evaluation_result"] = {
-                    "status": "skipped",
-                    "message": "未配置评估维度"
-                }
-                state["next_step"] = "completed"
-                return state
-            
-            # 准备评估系统提示
-            tech_stack = state.get("tech_stack", "")
-            evaluation_system_prompt = f"""
-            你是一位专业的提示词评估专家，负责评估设计图提示词的质量。
-            请根据以下维度评估提示词，为每个维度打分（0-10分）并给出改进建议：
-            
-            {', '.join(evaluation_dimensions)}
-            
-            请考虑以下因素：
-            1. 提示词是否清晰描述了设计图的UI元素和布局
-            2. 是否符合{tech_stack}技术栈的特点和最佳实践
-            3. 是否包含了必要的技术实现细节
-            4. 是否考虑了性能、可维护性和用户体验
-            5. 是否充分利用了项目中已有的组件
-            
-            请以JSON格式返回评估结果，包含以下字段：
-            1. scores: 各维度的评分
-            2. average_score: 平均评分
-            3. feedback: 总体反馈
-            4. improvement_suggestions: 改进建议（如果平均分低于阈值）
-            """
-            
-            # 准备评估提示
-            evaluation_prompt = f"""
-            请评估以下{tech_stack}技术栈的设计图提示词：
-            
-            设计图分析：
-            {state.get('design_analysis', '未提供设计图分析')}
-            
-            生成的提示词：
-            {state.get('generated_prompt', '未生成提示词')}
-            
-            请在评估中考虑以下技术栈特点：
-            {json.dumps(settings.DESIGN_PROMPT_CONFIG.get('tech_stack_config', {}).get(tech_stack, {}), ensure_ascii=False, indent=2)}
-            
-            请以JSON格式返回评估结果。
-            """
-            
-            # 初始化评估LLM
-            evaluation_llm = self._initialize_llm(task_type="evaluation", temperature=0.3)
-            
-            # 创建评估提示模板
-            evaluation_template = ChatPromptTemplate.from_messages([
-                ("system", evaluation_system_prompt),
-                ("human", evaluation_prompt)
-            ])
-            
-            # 格式化提示
-            formatted_evaluation_prompt = evaluation_template.format_messages()
-            
-            # 调用LLM
-            logger.info(f"调用LLM评估提示词，使用模型: {evaluation_llm.model_name}")
-            result = await evaluation_llm.apredict_messages(formatted_evaluation_prompt)
-            
-            # 解析评估结果 - 尝试提取JSON部分
-            evaluation_text = result.content
-            try:
-                # 查找JSON部分
-                json_start = evaluation_text.find('{')
-                json_end = evaluation_text.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_text = evaluation_text[json_start:json_end]
-                    evaluation_result = json.loads(json_text)
-                else:
-                    # 无法找到JSON，使用整个文本
-                    evaluation_result = {
-                        "scores": {},
-                        "average_score": 0,
-                        "feedback": "无法解析评估结果",
-                        "raw_result": evaluation_text
-                    }
-            except json.JSONDecodeError:
-                evaluation_result = {
-                    "scores": {},
-                    "average_score": 0,
-                    "feedback": "无法解析评估结果JSON",
-                    "raw_result": evaluation_text
-                }
-            
-            # 获取评估阈值
-            evaluation_threshold = settings.DESIGN_PROMPT_CONFIG.get("evaluation_threshold", 7.0)
-            
-            # 检查是否需要改进
-            average_score = evaluation_result.get("average_score", 0)
-            if average_score < evaluation_threshold and "improvement_suggestions" not in evaluation_result:
-                # 生成改进建议
-                improvement_prompt = f"""
-                刚刚评估的提示词平均分为{average_score}，低于阈值{evaluation_threshold}。
-                请提供具体的改进建议，使提示词达到更高质量。
-                """
-                
-                improvement_messages = [
-                    SystemMessage(content=evaluation_system_prompt),
-                    HumanMessage(content=evaluation_prompt),
-                    AIMessage(content=evaluation_text),
-                    HumanMessage(content=improvement_prompt)
-                ]
-                
-                improvement_result = await evaluation_llm.apredict_messages(improvement_messages)
-                evaluation_result["improvement_suggestions"] = improvement_result.content
-            
-            # 更新状态
-            state["evaluation_result"] = evaluation_result
-            state["next_step"] = "completed"
-            return state
-        except Exception as e:
-            logger.error(f"评估提示词失败: {str(e)}")
-            state["evaluation_result"] = {
-                "status": "error",
-                "message": f"评估失败: {str(e)}"
-            }
-            state["next_step"] = "completed"
-            return state
-    
-    async def generate_design_prompt(
+        logger.info(f"项目分析暂不可用，项目ID: {project_id}")
+        return {
+            "status": "info",
+            "message": "项目分析功能已禁用",
+            "tech_stack": tech_stack,
+            "components": tech_stack_components or []
+        }
+
+    async def _generate_prompt(
         self,
         design_image_id: str,
         tech_stack: str,
-        agent_type: str = None,
-        rag_method: str = None,
-        retriever_top_k: int = None,
-        temperature: float = None,
-        context_window_size: int = None,
-        skip_cache: bool = False,
-        project_analysis: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """生成设计提示词
+        design_analysis: str,
+        project_analysis: str,
+        similar_designs: str,
+        tech_stack_components: Optional[List[Dict[str, Any]]] = None,
+        skip_cache: bool = False
+    ) -> str:
+        """生成设计Prompt
         
         Args:
             design_image_id: 设计图ID
             tech_stack: 技术栈
-            agent_type: 代理类型
-            rag_method: RAG方法
-            retriever_top_k: 检索结果数量
-            temperature: 温度
-            context_window_size: 上下文窗口大小
-            skip_cache: 是否跳过缓存
+            design_analysis: 设计图分析结果
             project_analysis: 项目分析结果
+            similar_designs: 相似设计信息
+            tech_stack_components: 技术栈组件列表
+            skip_cache: 是否跳过缓存
             
         Returns:
-            Dict[str, Any]: 生成结果
+            str: 生成的Prompt
         """
-        start_time = time.time()
-        
-        # 设置默认值
-        agent_type = agent_type or "standard"
-        rag_method = rag_method or "similarity"
-        retriever_top_k = retriever_top_k or 3
-        temperature = temperature or self.temperature
-        context_window_size = context_window_size or 4000
-        
-        # 初始化状态
-        initial_state: DesignPromptState = {
-            "messages": [],
-            "tech_stack": tech_stack,
-            "design_image_id": design_image_id,
-            "design_image_path": "",
-            "similar_designs": [],
-            "history_prompts": [],
-            "rag_method": rag_method,
-            "retriever_top_k": retriever_top_k,
-            "agent_type": agent_type,
-            "temperature": temperature,
-            "context_window_size": context_window_size,
-            "generated_prompt": "",
-            "next_step": "start",
-            "design_analysis": "",
-            "project_analysis": project_analysis,
-            "skip_cache": skip_cache,
-            "tech_stack_components": [],
-            "evaluation_result": None
-        }
+        from datetime import datetime
+        import hashlib
         
         try:
-            logger.info(f"开始生成设计提示词: 设计图ID={design_image_id}, 技术栈={tech_stack}")
+            start_time = time.time()
+            logger.info(f"开始生成Prompt: design_image_id={design_image_id}, tech_stack={tech_stack}")
             
-            # 检查设计图ID
-            if not design_image_id:
-                return {"status": "error", "message": "设计图ID不能为空"}
+            # 获取设计图路径
+            design_image_path = await self._get_design_image_path(design_image_id)
+            if not design_image_path:
+                logger.warning(f"无法找到设计图: {design_image_id}")
+            
+            # 获取设计图的base64数据（如果分析结果中有）
+            design_image_base64 = None
+            if self.state and "design_analysis_raw" in self.state and self.state["design_analysis_raw"]:
+                design_image_base64 = self.state["design_analysis_raw"].get("image_base64")
+                if design_image_base64:
+                    logger.info(f"从设计分析结果中获取到设计图base64数据，长度: {len(design_image_base64)//1000}KB")
+            
+            # 如果state中没有，检查design_analysis_raw字典是否可以直接获取
+            if not design_image_base64 and isinstance(design_analysis, dict) and "image_base64" in design_analysis:
+                design_image_base64 = design_analysis.get("image_base64")
+                if design_image_base64:
+                    logger.info(f"从设计分析字典中获取到设计图base64数据，长度: {len(design_image_base64)//1000}KB")
+            
+            # 如果现在仍然没有base64数据，尝试从文件路径读取
+            if not design_image_base64 and design_image_path and os.path.exists(design_image_path):
+                try:
+                    from src.utils.design_image_processor import DesignImageProcessor
+                    processor = DesignImageProcessor()
+                    design_image_base64 = processor.get_image_base64(design_image_path)
+                    if design_image_base64:
+                        logger.info(f"从文件路径读取到设计图base64数据，长度: {len(design_image_base64)//1000}KB")
+                        
+                        # 保存到状态以便后续使用
+                        if self.state:
+                            self.state["design_image_base64"] = design_image_base64
+                except Exception as e:
+                    logger.warning(f"从文件读取设计图base64数据失败: {str(e)}")
+            
+            # 检查缓存
+            if not skip_cache:
+                # 计算缓存键
+                if design_image_base64:
+                    # 使用base64数据的哈希作为标识符
+                    try:
+                        # 提取base64数据部分
+                        if ',' in design_image_base64:
+                            _, b64_data = design_image_base64.split(',', 1)
+                            # 使用截断的哈希，减少长度
+                            image_hash = hashlib.md5(b64_data[:5000].encode('utf-8')).hexdigest()[:16]
+                        else:
+                            image_hash = hashlib.md5(design_image_base64[:5000].encode('utf-8')).hexdigest()[:16]
+                    except Exception as e:
+                        logger.warning(f"计算图像哈希失败: {str(e)}")
+                        image_hash = design_image_id
+                else:
+                    image_hash = design_image_id
                 
-            # 检查技术栈
-            if not tech_stack:
-                return {"status": "error", "message": "技术栈不能为空"}
+                cache_key = f"{image_hash}_{tech_stack}"
+                
+                # 检查缓存
+                if cache_key in self._prompt_cache:
+                    cached_prompt = self._prompt_cache[cache_key]
+                    # 检查时间戳以确保不使用过期内容
+                    timestamp = cached_prompt.get('timestamp', 0)
+                    if time.time() - timestamp < self._cache_expiry:
+                        prompt = cached_prompt.get('prompt', '')
+                        if prompt:
+                            logger.info(f"从缓存获取Prompt，缓存键: {cache_key}")
+                            return prompt
             
-            # 执行工作流
-            logger.info("执行设计提示词生成工作流")
+            # 创建系统提示
+            system_content = """你是一位专业的移动/Web应用开发专家，根据设计图和项目分析生成详细的开发提示。请生成一个全面的提示，其中包括：
+1. 用户界面(UI)详细说明，包括所有组件、布局、颜色、字体等
+2. 各组件的交互行为描述
+3. 必要的数据结构和API接口
+4. 实现细节和技术栈特定指导
+
+请以清晰、结构化的方式提供这些信息，以便开发人员能够准确实现设计图所示的界面。
+回答应当包含丰富的细节和技术实现指导，不要过于简略。
+根据分析信息组织回答，特别关注设计元素和项目特性。"""
+
+            # 构建用户提示
+            user_content = f"### 技术栈\n{tech_stack}\n\n"
             
-            # 由于工作流是同步调用而方法是异步的，我们暂时跳过工作流
-            # 直接执行流程以生成结果
+            if design_analysis:
+                user_content += f"### 设计分析\n{design_analysis}\n\n"
+            else:
+                logger.warning("设计分析信息为空！这可能导致生成的提示词质量下降")
+                user_content += "### 设计分析\n没有提供设计分析信息。\n\n"
+            
+            if project_analysis:
+                user_content += f"### 项目分析\n{project_analysis}\n\n"
+            
+            if similar_designs:
+                user_content += f"### 相似设计\n{similar_designs}\n\n"
+            
+            if tech_stack_components and isinstance(tech_stack_components, list):
+                user_content += "### 技术栈组件\n"
+                for component in tech_stack_components:
+                    if isinstance(component, dict):
+                        name = component.get('name', '')
+                        version = component.get('version', '')
+                        description = component.get('description', '')
+                        if name:
+                            user_content += f"- {name}"
+                            if version:
+                                user_content += f" (版本: {version})"
+                            user_content += "\n"
+                            if description:
+                                user_content += f"  {description}\n"
+                user_content += "\n"
+            
+            # 添加设计图的base64数据（如果有）
+            if design_image_base64:
+                user_content += f"### 设计图（Base64）\n"
+                data_length = len(design_image_base64)
+                
+                # 添加一些图像信息
+                user_content += f"设计图数据长度: {data_length//1000}KB\n"
+                
+                # 添加图像数据 - 不需要展示全部，确保提示词不会太长
+                # OpenAI API对token有限制，所以我们最多包含一部分base64数据
+                max_base64_length = 50000  # 截取前50KB
+                if data_length > max_base64_length:
+                    truncated_data = design_image_base64[:max_base64_length] + "..."
+                    user_content += f"已截断的Base64数据: {truncated_data}\n\n"
+                    logger.info(f"设计图base64数据已截断，原长度: {data_length//1000}KB")
+                else:
+                    user_content += f"{design_image_base64}\n\n"
+            else:
+                logger.warning("设计图base64数据不可用！这可能影响生成的提示词质量")
+            
+            # 添加命令
+            user_content += "请基于以上信息，生成一个详细的开发提示，以帮助开发人员实现设计图所示的界面。"
+            
+            # 使用LLM生成Prompt
+            chat_history = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}
+            ]
+            
+            # 选择模型
             try:
-                # 简化流程：直接执行必要步骤
-                state = initial_state.copy()
-                
-                # 分析设计图
-                design_result = await self._analyze_design(state)
-                design_analysis = design_result.get("design_analysis", "")
-                
-                # 获取相似设计
-                similar_result = await self._retrieve_similar_designs(state)
-                similar_designs = similar_result.get("similar_designs", [])
-                
-                # 获取设计提示词
-                state["design_analysis"] = design_analysis
-                state["similar_designs"] = similar_designs
-                prompt_result = await self._generate_prompt(state)
-                
-                final_state = {
-                    "generated_prompt": prompt_result.get("generated_prompt", ""),
-                    "design_analysis": design_analysis,
-                    "similar_designs": similar_designs,
-                    "tech_stack_components": prompt_result.get("tech_stack_components", [])
-                }
-                
+                llm = self._initialize_llm("prompt_generation", temperature=self.temperature)
+                logger.info(f"使用模型: {llm.model_name}")
             except Exception as e:
-                logger.error(f"执行设计提示词生成流程失败: {str(e)}")
-                final_state = {
-                    "generated_prompt": f"生成设计提示词失败: {str(e)}",
-                    "design_analysis": "",
-                    "similar_designs": []
-                }
+                logger.warning(f"初始化提示词生成模型失败: {str(e)}")
+                llm = self._create_fallback_llm()
+                logger.info("使用回退模型生成提示词")
             
-            # 检查生成结果
-            if not final_state.get("generated_prompt"):
-                return {
-                    "status": "error",
-                    "message": "生成提示词失败",
-                    "details": final_state
-                }
+            try:
+                # 调用LLM
+                result = await llm.apredict_messages(chat_history)
+                response_content = result.content if hasattr(result, 'content') else str(result)
                 
-            # 构建返回结果
-            processing_time = time.time() - start_time
-            result = {
-                "status": "success",
-                "prompt": final_state["generated_prompt"],
-                "tech_stack": tech_stack,
-                "design_image_id": design_image_id,
-                "processing_time": processing_time,
-                "design_analysis": final_state.get("design_analysis", ""),
-                "similar_designs_count": len(final_state.get("similar_designs", [])),
-                "agent_type": agent_type,
-                "temperature": temperature
-            }
+                # 后处理提示词
+                processed_prompt = self._post_process_prompt(response_content)
+                
+                # 保存到缓存
+                if not skip_cache and self._prompt_cache is not None:
+                    self._prompt_cache[cache_key] = {
+                        'prompt': processed_prompt,
+                        'timestamp': time.time(),
+                        'tech_stack': tech_stack
+                    }
+                    
+                    # 清理缓存
+                    self._save_prompt_cache()
+                    logger.info(f"已保存生成的Prompt到缓存: {cache_key}")
+                
+                # 记录生成时间
+                process_time = time.time() - start_time
+                logger.info(f"Prompt生成完成，耗时: {process_time:.2f}秒")
+                
+                return processed_prompt
+            except Exception as e:
+                logger.error(f"生成Prompt时出错: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # 尝试使用备用方法
+                try:
+                    logger.info("尝试使用备用方法生成提示词...")
+                    fallback_prompt = self._generate_fallback_prompt(system_content, user_content)
+                    return fallback_prompt
+                except Exception as e2:
+                    logger.error(f"备用提示词生成也失败: {str(e2)}")
+                    return f"无法生成设计提示词。错误: {str(e)}。请检查日志了解更多详情。"
+        except Exception as e:
+            logger.error(f"_generate_prompt方法发生未处理异常: {str(e)}")
+            logger.error(traceback.format_exc())
+            return f"生成提示词时发生错误: {str(e)}。请联系管理员或查看日志了解更多信息。"
+
+    async def generate_design_prompt(
+        self,
+        design_image_id: str,
+        design_prompt_request: DesignPromptRequest,
+        skip_cache: bool = False,
+    ) -> DesignPromptResponse:
+        """生成设计图Prompt
+        
+        Args:
+            design_image_id: 设计图ID
+            design_prompt_request: 设计图Prompt生成请求
+            skip_cache: 是否跳过缓存（强制重新生成）
             
-            logger.info(f"设计提示词生成完成: 耗时={processing_time:.2f}秒")
-            return result
+        Returns:
+            DesignPromptResponse: 包含生成的Prompt和相关信息的响应
+        """
+        start_time = time.time()
+        logger.info(f"开始生成设计图Prompt: design_image_id={design_image_id}, tech_stack={design_prompt_request.tech_stack}")
+        
+        # 参数验证
+        if not design_image_id:
+            logger.error("设计图ID为空")
+            return DesignPromptResponse(
+                status=ResponseStatus.FAILED,
+                message="设计图ID不能为空",
+                processing_time=time.time() - start_time
+            )
+        
+        if not design_prompt_request.tech_stack:
+            logger.error("技术栈为空")
+            return DesignPromptResponse(
+                status=ResponseStatus.FAILED,
+                message="技术栈不能为空",
+                processing_time=time.time() - start_time
+            )
+        
+        try:
+            # 1. 尝试从缓存获取
+            cache_key = f"{design_image_id}_{design_prompt_request.tech_stack}"
+            if not skip_cache and cache_key in self._prompt_cache:
+                cached_item = self._prompt_cache[cache_key]
+                if time.time() - cached_item.get("timestamp", 0) < self._cache_expiry:
+                    logger.info(f"从缓存中获取Prompt: {cache_key}")
+                    cached_prompt = cached_item.get("prompt", "")
+                    if cached_prompt:
+                        return DesignPromptResponse(
+                            status=ResponseStatus.SUCCESS,
+                            message="成功从缓存获取设计图Prompt",
+                            prompt=cached_prompt,
+                            design_analysis=self._format_design_analysis(self.state.get("design_analysis_raw")),
+                            project_analysis=self._format_project_analysis(self.state.get("project_analysis")),
+                            similar_designs=self._format_similar_designs(self.state.get("similar_designs")),
+                            tech_stack=design_prompt_request.tech_stack,
+                            processing_time=time.time() - start_time
+                        )
+            
+            # 2. 分析设计图
+            try:
+                design_analysis_raw = await self._analyze_design(design_image_id)
+                if not design_analysis_raw:
+                    logger.error(f"分析设计图失败: {design_image_id}")
+                    return DesignPromptResponse(
+                        status=ResponseStatus.FAILED,
+                        message="无法分析设计图，请检查设计图ID是否正确",
+                        processing_time=time.time() - start_time
+                    )
+                self.state["design_analysis_raw"] = design_analysis_raw
+                design_analysis = self._format_design_analysis(design_analysis_raw)
+            except Exception as e:
+                logger.error(f"分析设计图时出错: {str(e)}")
+                return DesignPromptResponse(
+                    status=ResponseStatus.FAILED,
+                    message=f"分析设计图时出错: {str(e)}",
+                    processing_time=time.time() - start_time
+                )
+                
+            # 3. 分析项目（如果提供了项目ID）
+            project_analysis_raw = None
+            project_analysis = ""
+            if hasattr(design_prompt_request, 'project_id') and design_prompt_request.project_id:
+                try:
+                    project_analysis_raw = await self._analyze_project(
+                        design_prompt_request.project_id,
+                        design_prompt_request.tech_stack,
+                        design_prompt_request.tech_stack_components
+                    )
+                    self.state["project_analysis"] = project_analysis_raw
+                    project_analysis = self._format_project_analysis(project_analysis_raw)
+                except Exception as e:
+                    logger.warning(f"分析项目时出错（非致命）: {str(e)}")
+                    # 项目分析失败不应阻止整个流程
+            
+            # 4. 获取相似设计
+            similar_designs = ""
+            try:
+                self.state = await self._retrieve_similar_designs(self.state)
+                similar_designs = self._format_similar_designs(self.state.get("similar_designs"))
+            except Exception as e:
+                logger.warning(f"获取相似设计时出错（非致命）: {str(e)}")
+                # 获取相似设计失败不应阻止整个流程
+            
+            # 5. 生成Prompt
+            try:
+                prompt = await self._generate_prompt(
+                    design_image_id=design_image_id,
+                    tech_stack=design_prompt_request.tech_stack,
+                    design_analysis=design_analysis,
+                    project_analysis=project_analysis,
+                    similar_designs=similar_designs,
+                    tech_stack_components=design_prompt_request.tech_stack_components,
+                    skip_cache=skip_cache
+                )
+                
+                # 返回结果
+                processing_time = time.time() - start_time
+                logger.info(f"成功生成设计图Prompt，耗时: {processing_time:.2f}秒")
+                
+                return DesignPromptResponse(
+                    status=ResponseStatus.SUCCESS,
+                    message="成功生成设计图Prompt",
+                    prompt=prompt,
+                    design_analysis=design_analysis,
+                    project_analysis=project_analysis,
+                    similar_designs=similar_designs,
+                    tech_stack=design_prompt_request.tech_stack,
+                    processing_time=processing_time
+                )
+            except Exception as e:
+                logger.error(f"生成Prompt时出错: {str(e)}")
+                return DesignPromptResponse(
+                    status=ResponseStatus.FAILED,
+                    message=f"生成Prompt时出错: {str(e)}",
+                    processing_time=time.time() - start_time
+                )
+                
+        except Exception as e:
+            error_msg = f"生成设计图Prompt过程中发生未预期错误: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            
+            return DesignPromptResponse(
+                status=ResponseStatus.FAILED,
+                message=error_msg,
+                processing_time=time.time() - start_time
+            )
+
+    def _init_state(self, design_image_id: str) -> None:
+        """初始化代理状态"""
+        self.state = {
+            "design_image_id": design_image_id,
+            "design_image_path": "",
+            "design_analysis_raw": None,
+            "image_base64": None,
+            "similar_designs": [],
+            "project_analysis_raw": None
+        }
+
+    def _format_project_analysis(self, project_analysis: Optional[Dict[str, Any]]) -> str:
+        """格式化项目分析结果"""
+        if not project_analysis:
+            return "未提供项目分析数据。"
+        
+        try:
+            formatted_result = "## 项目分析结果\n\n"
+            
+            # 添加项目分析状态
+            status = project_analysis.get("status", "")
+            if status:
+                formatted_result += f"**分析状态**: {status}\n\n"
+            
+            # 添加技术栈信息
+            tech_stack = project_analysis.get("tech_stack", {})
+            if tech_stack:
+                formatted_result += "### 技术栈信息\n"
+                for key, value in tech_stack.items():
+                    formatted_result += f"- **{key}**: {value}\n"
+                formatted_result += "\n"
+            
+            # 添加组件信息
+            components = project_analysis.get("components", [])
+            if components:
+                formatted_result += "### 组件信息\n"
+                for component in components:
+                    component_name = component.get("name", "未命名组件")
+                    component_type = component.get("type", "未指定类型")
+                    formatted_result += f"- **{component_name}** ({component_type})\n"
+                    
+                    # 添加组件属性
+                    props = component.get("props", {})
+                    if props:
+                        formatted_result += "  属性:\n"
+                        for prop_name, prop_value in props.items():
+                            formatted_result += f"  - {prop_name}: {prop_value}\n"
+                
+                formatted_result += "\n"
+            
+            # 添加代码摘要
+            summaries = project_analysis.get("summaries", [])
+            if summaries:
+                formatted_result += "### 代码摘要\n"
+                for summary in summaries[:5]:  # 限制数量以避免过长
+                    summary_file = summary.get("file", "未指定文件")
+                    summary_content = summary.get("summary", "无摘要")
+                    formatted_result += f"- **{summary_file}**:\n  {summary_content}\n"
+                
+                formatted_result += "\n"
+            
+            # 添加代码标准
+            standards = project_analysis.get("standards", {})
+            if standards:
+                formatted_result += "### 代码标准\n"
+                for standard_name, standard_desc in standards.items():
+                    formatted_result += f"- **{standard_name}**: {standard_desc}\n"
+                
+                formatted_result += "\n"
+            
+            return formatted_result
+        
+        except Exception as e:
+            logger.error(f"格式化项目分析结果失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            return "项目分析结果格式化失败。"
+
+    def _format_design_analysis(self, analysis: Optional[Dict[str, Any]]) -> str:
+        """格式化设计图分析结果为字符串
+
+        Args:
+            analysis: 设计图分析结果
+
+        Returns:
+            str: 格式化后的设计图分析结果
+        """
+        if not analysis:
+            logger.warning("设计分析结果为空")
+            return "设计分析信息不可用。"
+
+        try:
+            # 检查分析结果状态
+            if isinstance(analysis, dict) and analysis.get("status") == "error":
+                error_msg = analysis.get("error_message", "未知错误")
+                logger.warning(f"设计分析包含错误: {error_msg}")
+                
+                # 仍然尝试构造一些基本信息
+                summary = "设计分析过程中出现错误，提供的信息可能不完整。"
+                raw_analysis = analysis.get("raw_analysis", "")
+                
+                # 即使有错误，也尝试从分析结果中提取一些基本信息
+                elements = analysis.get("elements", [])
+                colors = analysis.get("colors", [])
+                layout = analysis.get("layout", {})
+                fonts = analysis.get("fonts", [])
+            else:
+                # 从分析结果中提取信息
+                summary = analysis.get("summary", "无设计概述")
+                elements = analysis.get("elements", [])
+                colors = analysis.get("colors", [])
+                layout = analysis.get("layout", {})
+                fonts = analysis.get("fonts", [])
+                raw_analysis = analysis.get("raw_analysis", "")
+            
+            # 检索设计图base64数据
+            design_image_base64 = None
+            # 首先尝试从分析结果中获取
+            if "image_base64" in analysis:
+                design_image_base64 = analysis.get("image_base64")
+                logger.info("从分析结果中获取到设计图base64数据")
+            # 如果分析结果中没有，尝试从状态中获取
+            elif self.state and "design_image_base64" in self.state:
+                design_image_base64 = self.state["design_image_base64"]
+                logger.info("从状态中获取到设计图base64数据")
+            
+            # 如果没有找到base64数据，记录警告
+            if not design_image_base64:
+                logger.warning("未找到设计图base64数据")
+            
+            # 添加到状态中以供其他方法使用
+            if design_image_base64 and self.state:
+                self.state["design_image_base64"] = design_image_base64
+                logger.info("已将设计图base64数据保存到状态中")
+                
+            # 构建格式化的分析结果
+            formatted_analysis = "## 设计概述\n"
+            if summary and len(summary) > 10:
+                formatted_analysis += f"{summary}\n\n"
+            else:
+                if raw_analysis:
+                    # 从原始分析中提取前100个字符作为概述
+                    formatted_analysis += f"{raw_analysis[:100]}...\n\n"
+                else:
+                    formatted_analysis += "无法提取设计概述信息。\n\n"
+            
+            # 格式化UI组件
+            formatted_analysis += "## UI组件\n"
+            if elements and len(elements) > 0:
+                for element in elements:
+                    if isinstance(element, dict):
+                        name = element.get("name", "未命名组件")
+                        type_info = element.get("type", "未知类型")
+                        description = element.get("description", "")
+                        
+                        formatted_analysis += f"- **{name}** ({type_info})"
+                        if description:
+                            formatted_analysis += f": {description}"
+                        formatted_analysis += "\n"
+            else:
+                # 提供通用的UI组件信息作为回退
+                formatted_analysis += """根据常见设计模式，该界面可能包含以下组件：
+- **顶部应用栏/导航栏**：包含应用标题、导航图标和操作按钮
+- **内容区域**：主要信息展示区
+- **按钮/交互元素**：用于用户交互的可点击元素
+- **输入控件**：可能包含文本输入、选择框等
+- **列表/网格**：用于展示多项内容
+- **底部导航栏**：提供主要功能区域的切换
+
+由于分析不完整，请根据实际设计图补充具体UI组件信息。
+"""
+            
+            # 格式化颜色方案
+            formatted_analysis += "\n## 颜色方案\n"
+            if colors and len(colors) > 0:
+                for color in colors:
+                    if isinstance(color, dict):
+                        hex_code = color.get("hex", "#000000")
+                        name = color.get("name", "未命名颜色")
+                        usage = color.get("usage", "")
+                        
+                        formatted_analysis += f"- **{name}**: `{hex_code}`"
+                        if usage:
+                            formatted_analysis += f" - {usage}"
+                        formatted_analysis += "\n"
+            else:
+                # 提供通用的颜色方案信息作为回退
+                formatted_analysis += """常见的应用颜色方案包括：
+- **主色调**：`#3F51B5`（靛蓝色）- 用于主要界面元素
+- **强调色**：`#FF4081`（粉红色）- 用于突出重要操作
+- **背景色**：`#FFFFFF`（白色）- 用于内容背景
+- **文本色**：`#212121`（深灰色）- 用于主要文本
+- **次要文本色**：`#757575`（中灰色）- 用于次要文本
+
+请根据实际设计图确定颜色方案。
+"""
+            
+            # 格式化字体样式
+            formatted_analysis += "\n## 字体样式\n"
+            if fonts and len(fonts) > 0:
+                for font in fonts:
+                    if isinstance(font, dict):
+                        name = font.get("name", "未命名字体")
+                        style = font.get("style", "Regular")
+                        size = font.get("size", "未知大小")
+                        
+                        formatted_analysis += f"- **{name}** {style}, {size}\n"
+            else:
+                # 提供通用的字体样式信息作为回退
+                formatted_analysis += """常见的应用字体样式包括：
+- **标题字体**: Roboto Bold, 24sp
+- **副标题字体**: Roboto Medium, 18sp
+- **正文字体**: Roboto Regular, 16sp
+- **小字体**: Roboto Light, 14sp
+- **按钮文本**: Roboto Medium, 14sp
+
+请根据实际设计图确定使用的字体和大小。
+"""
+            
+            # 格式化布局结构
+            formatted_analysis += "\n## 布局结构\n"
+            if layout and isinstance(layout, dict):
+                structure = layout.get("structure", "未知布局")
+                alignment = layout.get("alignment", "未知对齐方式")
+                spacing = layout.get("spacing", "未知间距")
+                
+                formatted_analysis += f"- **布局结构**: {structure}\n"
+                formatted_analysis += f"- **对齐方式**: {alignment}\n"
+                formatted_analysis += f"- **间距设置**: {spacing}\n"
+            else:
+                # 提供通用的布局结构信息作为回退
+                formatted_analysis += """常见的应用布局结构包括：
+- **布局结构**: 垂直线性布局（LinearLayout），带有嵌套的水平布局
+- **对齐方式**: 左对齐内容，居中对齐标题和按钮
+- **间距设置**: 16dp 外边距，8dp 元素间距
+
+请根据实际设计图确定布局结构细节。
+"""
+            
+            return formatted_analysis
+                
+        except Exception as e:
+            logger.error(f"格式化设计分析结果时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # 返回基本的错误信息和通用提示
+            return """## 设计分析（处理出错）
+
+抱歉，处理设计图分析结果时出现错误。以下是一些通用的设计指南：
+
+### UI组件
+- 顶部应用栏：包含应用名称和主要操作
+- 内容区域：展示主要信息
+- 交互元素：按钮、输入框等
+- 导航元素：底部导航栏或侧边导航
+
+### 颜色方案
+- 主色调：应用的主要品牌颜色
+- 次要颜色：用于强调和区分元素
+- 背景色：通常为白色或浅色
+- 文本颜色：深色文本以保证可读性
+
+### 字体样式
+- 标题：较大且醒目
+- 正文：清晰易读
+- 强调文本：使用粗体或不同颜色
+
+### 布局结构
+- 清晰的视觉层次
+- 一致的对齐和间距
+- 适当的元素分组
+
+请结合实际设计图补充具体细节。"""
+
+    async def _get_design_image_path(self, design_image_id: str) -> str:
+        """获取设计图路径
+        
+        Args:
+            design_image_id: 设计图ID
+            
+        Returns:
+            str: 设计图路径
+        """
+        try:
+            # 使用config.config中的设置获取上传目录
+            from config.config import settings
+            
+            # 构建设计图路径 - 使用pathlib.Path确保跨平台兼容性
+            upload_dir = Path(settings.UPLOAD_DIR)
+            
+            # 检查目录是否存在，不存在则创建
+            if not upload_dir.exists():
+                try:
+                    upload_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"已创建上传目录: {upload_dir}")
+                except Exception as e:
+                    logger.error(f"创建上传目录失败: {str(e)}")
+                    return None
+            
+            # 判断设计图ID是否为base64编码的图像数据
+            # 通常base64编码的图像数据以"data:image/"开头
+            if design_image_id and isinstance(design_image_id, str) and design_image_id.startswith('data:image/'):
+                try:
+                    logger.info("检测到base64编码的图像数据")
+                    import base64
+                    import tempfile
+                    import uuid
+                    
+                    # 提取MIME类型和base64数据
+                    parts = design_image_id.split(';base64,')
+                    if len(parts) != 2:
+                        logger.error("base64数据格式不正确")
+                        return None
+                        
+                    mime_type = parts[0].replace('data:', '')
+                    base64_data = parts[1]
+                    
+                    # 从MIME类型获取图像格式
+                    img_format = mime_type.split('/')[1]
+                    
+                    # 解码base64数据
+                    try:
+                        img_data = base64.b64decode(base64_data)
+                    except Exception as decode_err:
+                        logger.error(f"base64解码失败: {str(decode_err)}")
+                        return None
+                    
+                    # 创建临时文件
+                    temp_file = upload_dir / f"design_image_{uuid.uuid4().hex}.{img_format}"
+                    
+                    # 保存图像到临时文件
+                    with open(temp_file, "wb") as f:
+                        f.write(img_data)
+                    
+                    logger.info(f"已将base64图像保存为文件: {temp_file}")
+                    
+                    # 将base64数据保存到state中，以便后续使用
+                    self.state["image_base64"] = design_image_id
+                    
+                    return str(temp_file)
+                except Exception as e:
+                    logger.error(f"处理base64图像数据失败: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    # 继续尝试其他方法
+            
+            # 尝试常见的图像扩展名
+            for ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif']:
+                test_path = upload_dir / f"{design_image_id}{ext}"
+                if test_path.exists():
+                    logger.info(f"找到设计图文件: {test_path}")
+                    return str(test_path)
+            
+            # 尝试在上传目录中模糊匹配
+            for file_path in upload_dir.glob("*"):
+                if file_path.is_file() and any(file_path.name.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif']):
+                    # 检查文件名是否包含设计ID
+                    if design_image_id in file_path.stem:
+                        logger.info(f"找到匹配的设计图: {file_path}")
+                        return str(file_path)
+            
+            # 找不到设计图，记录错误
+            logger.error(f"无法找到设计图: {design_image_id}")
+            return None
             
         except Exception as e:
-            logger.error(f"生成设计提示词失败: {str(e)}", exc_info=True)
+            logger.error(f"获取设计图路径失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def _create_fallback_llm(self):
+        """创建一个回退LLM，在API调用失败时使用
+        
+        Returns:
+            一个模拟的LLM对象，可以在API失败时提供基本功能
+        """
+        # 创建一个模拟LLM对象
+        class FallbackLLM:
+            async def apredict_messages(self, messages):
+                """模拟异步预测，返回一个包含默认内容的响应"""
+                system_content = ""
+                user_content = ""
+                
+                # 提取system和user消息，用于生成更有针对性的回退响应
+                for msg in messages:
+                    if hasattr(msg, "content") and hasattr(msg, "type"):
+                        if msg.type == "system":
+                            system_content = msg.content
+                        elif msg.type == "human":
+                            user_content = msg.content
+                
+                # 创建一个AIMessage对象
+                from langchain_core.messages import AIMessage
+                
+                # 使用回退生成方法
+                fallback_content = self._generate_fallback_prompt(system_content, user_content)
+                return AIMessage(content=fallback_content)
+                
+        # 返回实例
+        fallback_llm = FallbackLLM()
+        fallback_llm._generate_fallback_prompt = self._generate_fallback_prompt
+        return fallback_llm
+    
+    def _generate_fallback_prompt(self, system_content: str, user_content: str) -> str:
+        """生成回退提示词（当LLM调用失败时使用）
+        
+        Args:
+            system_content: 系统提示内容
+            user_content: 用户提示内容
             
-            # 返回错误信息
-            return {
-                "status": "error",
-                "message": f"生成设计提示词失败: {str(e)}",
-                "details": {
-                    "design_image_id": design_image_id,
-                    "tech_stack": tech_stack,
-                    "error": str(e)
-                }
-            } 
+        Returns:
+            str: 生成的回退提示词
+        """
+        logger.warning("使用回退机制生成提示词")
+        
+        try:
+            # 从用户内容中提取技术栈信息
+            tech_stack_match = re.search(r'为(.+?)技术栈生成', user_content)
+            tech_stack = tech_stack_match.group(1) if tech_stack_match else "未指定"
+            
+            # 构建通用模板提示词
+            fallback_prompt = f"""# {tech_stack}开发提示词
+
+## 界面概述
+这是一个移动应用UI界面，包含了多个交互组件。界面采用简洁现代的设计风格，主要使用了轻量级的视觉元素。
+
+## 关键UI组件
+- **顶部导航栏**：包含标题文本和可能的返回按钮
+- **内容区域**：主要展示区域，可能包含文本、图像或列表内容
+- **底部操作区**：可能包含按钮、输入框或其他交互元素
+- **状态指示器**：显示当前状态或进度的元素（如加载动画、进度条）
+
+## 布局要求
+- 采用垂直流式布局，组件从上到下排列
+- 内容区域可能需要支持滚动
+- 组件间距保持一致，建议使用8dp的基础间距单位
+- 边距统一为16dp
+
+## 颜色方案
+- **主色调**：#4285F4（蓝色）
+- **次要色**：#34A853（绿色）
+- **强调色**：#EA4335（红色）
+- **背景色**：#FFFFFF（白色）
+- **文本色**：#202124（深灰色，主文本），#5F6368（中灰色，次要文本）
+
+## 字体规范
+- 主要文本：Roboto Regular，14sp
+- 标题文本：Roboto Medium，16sp
+- 强调文本：Roboto Bold，14sp
+- 次要文本：Roboto Light，12sp
+
+## 交互细节
+- 按钮点击时应有轻微的视觉反馈（颜色变化或轻微缩放）
+- 列表项支持滑动操作
+- 输入框获得焦点时边框颜色应变为主色调
+- 错误状态使用强调色（红色）提示
+
+## 响应式考虑
+- 界面元素应适应不同屏幕尺寸，保持相对比例
+- 文本应设置最大行数，超出部分显示省略号
+- 图片应维持宽高比，避免变形
+
+## 动画效果
+- 界面转场使用淡入淡出效果，时长300ms
+- 按钮点击反馈使用波纹效果
+- 列表加载时可使用骨架屏动画
+
+## 实现建议
+- 使用{tech_stack}标准组件库实现界面元素
+- 考虑使用约束布局减少嵌套层级
+- 文本使用资源文件管理，支持多语言
+- 图标建议使用矢量图标（SVG或XML矢量）
+"""
+            
+            logger.info("成功生成回退提示词模板")
+            return fallback_prompt
+            
+        except Exception as e:
+            logger.error(f"生成回退提示词时出错: {str(e)}")
+            # 最简单的回退方案
+            return f"""# {tech_stack}界面开发提示词
+
+## 界面描述
+这是一个包含常见UI组件的{tech_stack}界面。
+
+## 实现要点
+- 使用标准UI组件
+- 遵循平台设计规范
+- 实现基本的用户交互
+- 保持界面简洁易用"""
+
+    def _save_prompt_cache(self) -> None:
+        """保存提示词缓存到文件"""
+        try:
+            if not self._prompt_cache_file:
+                logger.warning("缓存文件路径未设置，无法保存缓存")
+                return
+                
+            # 确保文件路径存在
+            cache_dir = Path(self._prompt_cache_file).parent
+            cache_dir.mkdir(parents=True, exist_ok=True)
+                
+            # 保存到文件
+            with open(self._prompt_cache_file, "w", encoding="utf-8") as f:
+                json.dump(self._prompt_cache, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"已将{len(self._prompt_cache)}条提示词缓存保存到文件: {self._prompt_cache_file}")
+            
+            # 裁剪缓存大小
+            if len(self._prompt_cache) > self._max_cache_size:
+                # 按时间戳排序
+                sorted_items = sorted(
+                    [(k, v.get('timestamp', 0) if isinstance(v, dict) else 0) 
+                     for k, v in self._prompt_cache.items()],
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                
+                # 保留最新的项目
+                keys_to_keep = [k for k, _ in sorted_items[:self._max_cache_size]]
+                self._prompt_cache = {k: self._prompt_cache[k] for k in keys_to_keep}
+                logger.info(f"已裁剪缓存大小至{len(self._prompt_cache)}条")
+                
+                # 重新保存
+                with open(self._prompt_cache_file, "w", encoding="utf-8") as f:
+                    json.dump(self._prompt_cache, f, ensure_ascii=False, indent=2)
+                    
+        except Exception as e:
+            logger.error(f"保存提示词缓存失败: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def _post_process_prompt(self, prompt: str) -> str:
+        """对生成的提示词进行后处理
+        
+        Args:
+            prompt: 原始生成的提示词
+            
+        Returns:
+            str: 处理后的提示词
+        """
+        try:
+            # 移除可能的Markdown代码块标记
+            prompt = re.sub(r'```[a-zA-Z]*\n', '', prompt)
+            prompt = prompt.replace('```', '')
+            
+            # 移除多余的空行
+            prompt = re.sub(r'\n{3,}', '\n\n', prompt)
+            
+            # 确保每个主要部分之间有空行
+            section_headers = [
+                '# ', '## ', '### ', '#### ', 
+                '界面概述', '关键UI组件', '布局要求', '颜色方案', 
+                '字体规范', '交互细节', '响应式考虑', '动画效果', 
+                '实现建议'
+            ]
+            
+            for header in section_headers:
+                prompt = re.sub(f'([^\n])\n{re.escape(header)}', f'\\1\n\n{header}', prompt)
+            
+            # 确保标题前有足够的空间
+            for i in range(1, 5):
+                hashes = '#' * i
+                prompt = re.sub(f'([^\n])\n{hashes} ', f'\\1\n\n{hashes} ', prompt)
+                
+            # 移除可能的前导指令，如"下面是..."
+            prompt = re.sub(r'^(以下是|下面是|这是)[^#\n]+\n+', '', prompt)
+            
+            # 添加技术栈信息（如果没有）
+            tech_stack = self.state.get("tech_stack", "")
+            if tech_stack and "技术栈" not in prompt[:200]:
+                if prompt.startswith("#"):
+                    # 已经有标题，添加技术栈信息
+                    title_end = prompt.find("\n")
+                    if title_end > 0:
+                        title = prompt[:title_end].strip()
+                        rest = prompt[title_end:].strip()
+                        # 如果标题中没有技术栈，添加技术栈
+                        if tech_stack not in title:
+                            prompt = f"{title} - {tech_stack}技术栈\n\n{rest}"
+                else:
+                    # 没有标题，添加一个标题
+                    prompt = f"# {tech_stack}技术栈开发提示词\n\n{prompt}"
+            
+            return prompt.strip()
+        except Exception as e:
+            logger.error(f"提示词后处理失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            # 返回原始提示词
+            return prompt 

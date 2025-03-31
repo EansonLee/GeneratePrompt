@@ -11,6 +11,7 @@ from config.config import settings
 from src.utils.vector_store import VectorStore
 import asyncio
 from unittest.mock import Mock, AsyncMock
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -26,21 +27,48 @@ class RAGManager:
         try:
             self.vector_store = vector_store or VectorStore()
             
-            # 检查向量存储是否已初始化
-            if not hasattr(self.vector_store, 'stores') or not self.vector_store.stores:
-                logger.warning("向量存储未完全初始化，RAG功能将使用降级模式")
+            # 检查向量存储是否已初始化并等待其就绪
+            if not self.vector_store.is_ready():
+                logger.info("等待向量存储初始化完成...")
+                # 尝试等待向量存储初始化
+                max_retries = 3
+                retry_delay = 2
                 
-                # 创建Mock contexts如果不存在
-                if not hasattr(self.vector_store, 'contexts') or self.vector_store.contexts is None:
-                    # 创建Mock对象
-                    mock_contexts = AsyncMock()
-                    mock_contexts.as_retriever = Mock(return_value=AsyncMock())
-                    mock_contexts.as_retriever().aget_relevant_documents = AsyncMock(return_value=[])
-                    mock_contexts.similarity_search_with_score = Mock(return_value=[(Document(page_content="", metadata={}), 0.0)])
-                    
-                    # 设置到vector_store
-                    self.vector_store.contexts = mock_contexts
-                    logger.info("已创建Mock contexts，以支持基本操作")
+                for attempt in range(max_retries):
+                    try:
+                        # 如果向量存储没有就绪，先尝试初始化
+                        if not hasattr(self.vector_store, 'stores') or not self.vector_store.stores:
+                            logger.info(f"尝试手动初始化向量存储 (尝试 {attempt + 1}/{max_retries})...")
+                            
+                            # 确保向量存储初始化
+                            if hasattr(self.vector_store, '_init_stores'):
+                                self.vector_store.stores = self.vector_store._init_stores()
+                        
+                        # 确保存储属性已正确设置
+                        if hasattr(self.vector_store, 'fix_stores'):
+                            self.vector_store.fix_stores()
+                            
+                        # 确保所有属性直接可访问
+                        if hasattr(self.vector_store, 'ensure_store_attributes'):
+                            if not self.vector_store.ensure_store_attributes():
+                                logger.warning("无法确保所有存储属性可直接访问，可能会影响RAG功能")
+                        
+                        logger.info(f"向量存储初始化状态: {self.vector_store.is_ready()}")
+                        
+                        if self.vector_store.is_ready():
+                            logger.info("向量存储初始化成功")
+                            break
+                            
+                        if attempt < max_retries - 1:
+                            logger.info(f"等待 {retry_delay} 秒后重试...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # 指数退避
+                    except Exception as e:
+                        logger.error(f"向量存储初始化尝试失败: {str(e)}")
+                        if attempt < max_retries - 1:
+                            logger.info(f"等待 {retry_delay} 秒后重试...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
             
             # 初始化文本分割器
             self.text_splitter = RecursiveCharacterTextSplitter(
@@ -52,23 +80,93 @@ class RAGManager:
             # 初始化检索器
             if hasattr(self.vector_store, 'contexts') and self.vector_store.contexts is not None:
                 try:
+                    # 使用真实的检索器
                     self.retriever = self.vector_store.contexts.as_retriever(
                         search_kwargs={"k": 5}
                     )
-                    logger.info("已初始化检索器")
+                    logger.info("已初始化真实检索器")
+                    
+                    # 验证检索器
+                    test_doc = Document(page_content="测试文档", metadata={"id": "test"})
+                    if not hasattr(self.vector_store.contexts, 'docstore'):
+                        logger.info("初始化文档存储...")
+                        # 手动添加一个测试文档
+                        if hasattr(self.vector_store.contexts, '_collection'):
+                            self.vector_store.contexts._collection.add(
+                                ids=["test"],
+                                embeddings=[[0.0] * 1536],  # OpenAI嵌入维度
+                                documents=["测试文档"]
+                            )
+                    
+                    # 验证检索器功能
+                    if hasattr(self.retriever, 'get_relevant_documents'):
+                        logger.info("检索器已验证可用")
+                    else:
+                        logger.warning("检索器缺少必要的get_relevant_documents方法")
+                        raise ValueError("检索器初始化不完整")
+                    
                 except Exception as e:
                     logger.error(f"初始化检索器失败: {str(e)}")
-                    # 创建mock检索器
+                    # 使用内存中的向量存储创建新的检索器
+                    try:
+                        logger.info("尝试创建新的向量存储作为备用...")
+                        from langchain_community.vectorstores import FAISS
+                        from langchain_openai import OpenAIEmbeddings
+                        
+                        # 创建嵌入模型
+                        embeddings = OpenAIEmbeddings(
+                            model=settings.EMBEDDING_MODEL,
+                            openai_api_key=settings.OPENAI_API_KEY,
+                            openai_api_base=settings.OPENAI_BASE_URL
+                        )
+                        
+                        # 创建内存中的向量存储
+                        texts = ["初始化RAG管理器", "测试文档", "示例内容"]
+                        metadatas = [{"source": "init", "id": f"test_{i}"} for i in range(len(texts))]
+                        backup_store = FAISS.from_texts(texts, embeddings, metadatas=metadatas)
+                        
+                        # 创建检索器
+                        self.retriever = backup_store.as_retriever(search_kwargs={"k": 5})
+                        logger.info("已初始化备用检索器")
+                    except Exception as e2:
+                        logger.error(f"初始化备用检索器也失败: {str(e2)}")
+                        # 仅在备用检索器也失败时创建mock检索器
+                        mock_retriever = AsyncMock()
+                        mock_retriever.aget_relevant_documents = AsyncMock(return_value=[])
+                        self.retriever = mock_retriever
+                        logger.warning("使用Mock检索器，RAG功能将受限")
+            else:
+                # 创建一个内存中的向量存储而不是使用mock
+                try:
+                    logger.info("向量存储缺少contexts，创建内存中的向量存储...")
+                    from langchain_community.vectorstores import FAISS
+                    from langchain_openai import OpenAIEmbeddings
+                    
+                    # 创建嵌入模型
+                    embeddings = OpenAIEmbeddings(
+                        model=settings.EMBEDDING_MODEL,
+                        openai_api_key=settings.OPENAI_API_KEY,
+                        openai_api_base=settings.OPENAI_BASE_URL
+                    )
+                    
+                    # 创建内存中的向量存储
+                    texts = ["RAG初始化", "内存向量存储", "无需mock"]
+                    metadatas = [{"source": "init", "id": f"init_{i}"} for i in range(len(texts))]
+                    memory_store = FAISS.from_texts(texts, embeddings, metadatas=metadatas)
+                    
+                    # 创建检索器
+                    self.retriever = memory_store.as_retriever(search_kwargs={"k": 5})
+                    
+                    # 将新创建的内存存储添加到vector_store
+                    self.vector_store.contexts = memory_store
+                    logger.info("已初始化内存向量存储检索器")
+                except Exception as e:
+                    logger.error(f"创建内存向量存储失败: {str(e)}")
+                    # 创建mock检索器（作为最后的后备）
                     mock_retriever = AsyncMock()
                     mock_retriever.aget_relevant_documents = AsyncMock(return_value=[])
                     self.retriever = mock_retriever
                     logger.warning("使用Mock检索器，RAG功能将受限")
-            else:
-                # 创建mock检索器
-                mock_retriever = AsyncMock()
-                mock_retriever.aget_relevant_documents = AsyncMock(return_value=[])
-                self.retriever = mock_retriever
-                logger.warning("使用Mock检索器，RAG功能将受限")
             
             logger.info("RAG管理器初始化成功")
             

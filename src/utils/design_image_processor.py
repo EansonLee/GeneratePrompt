@@ -14,6 +14,8 @@ import time
 import asyncio
 import copy
 import re
+import tempfile
+import traceback
 
 from config.config import settings
 from src.utils.vector_store import VectorStore
@@ -54,7 +56,25 @@ class DesignImageProcessor:
         
         # 初始化基本属性
         self.vector_store = vector_store
-        self.upload_dir = upload_dir or str(settings.UPLOAD_DIR)
+        
+        # 确保上传目录是Path对象并且存在
+        if upload_dir:
+            self.upload_dir = Path(upload_dir)
+        else:
+            self.upload_dir = Path(settings.UPLOAD_DIR)
+        
+        # 确保上传目录存在
+        try:
+            self.upload_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"已确保上传目录存在: {self.upload_dir}")
+        except Exception as e:
+            logger.error(f"创建上传目录失败: {self.upload_dir}, 错误: {str(e)}")
+            # 尝试使用临时目录
+            import tempfile
+            self.upload_dir = Path(tempfile.gettempdir()) / "design_images"
+            self.upload_dir.mkdir(parents=True, exist_ok=True)
+            logger.warning(f"使用临时目录作为上传目录: {self.upload_dir}")
+        
         self.temperature = temperature if temperature is not None else settings.VISION_MODEL_CONFIG["temperature"]
         self.max_tokens = max_tokens if max_tokens is not None else settings.VISION_MODEL_CONFIG["max_tokens"]
         
@@ -74,8 +94,18 @@ class DesignImageProcessor:
         
         # 初始化缓存文件路径
         if DesignImageProcessor._analysis_cache_file is None:
-            DesignImageProcessor._analysis_cache_file = Path(settings.DATA_DIR) / "design_analysis_cache.json"
-            logger.info(f"设置分析缓存文件路径: {DesignImageProcessor._analysis_cache_file}")
+            cache_dir = Path(settings.DATA_DIR)
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                DesignImageProcessor._analysis_cache_file = cache_dir / "design_analysis_cache.json"
+                logger.info(f"设置分析缓存文件路径: {DesignImageProcessor._analysis_cache_file}")
+            except Exception as e:
+                logger.error(f"创建缓存目录失败: {str(e)}")
+                # 使用临时目录
+                import tempfile
+                temp_dir = Path(tempfile.gettempdir())
+                DesignImageProcessor._analysis_cache_file = temp_dir / "design_analysis_cache.json"
+                logger.warning(f"使用临时目录作为缓存文件路径: {DesignImageProcessor._analysis_cache_file}")
         
         # 加载缓存
         self._load_analysis_cache()
@@ -145,55 +175,64 @@ class DesignImageProcessor:
         """
         return hashlib.sha256(image_data).hexdigest()
     
-    def _get_design_image_path(self, design_image_id: str) -> str:
-        """根据设计图ID获取图片文件路径
+    def _get_design_image_path(self, design_id: str) -> Optional[Path]:
+        """获取设计图片路径
         
         Args:
-            design_image_id: 设计图ID
+            design_id: 设计ID
             
         Returns:
-            str: 图片文件路径
+            设计图片的路径或None（如果找不到）
         """
+        if not design_id:
+            logger.error("设计ID不能为空")
+            return None
+        
+        upload_dir = self.upload_dir
+        
         # 确保上传目录存在
-        upload_dir = Path(self.upload_dir)
         if not upload_dir.exists():
-            logger.warning(f"上传目录不存在，尝试创建: {upload_dir}")
             try:
                 upload_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"已创建上传目录: {upload_dir}")
             except Exception as e:
-                logger.error(f"创建上传目录失败: {str(e)}")
-                
-        logger.info(f"查找设计图: ID={design_image_id}, 目录={upload_dir}")
-                
-        # 查找支持的图片扩展名
-        supported_exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+                logger.error(f"创建上传目录失败: {upload_dir}, 错误: {str(e)}")
+                return None
         
-        # 列出目录内容进行调试
-        try:
-            files = list(upload_dir.glob('*'))
-            logger.info(f"上传目录内容 ({len(files)}个文件): {', '.join(f.name for f in files[:10])}")
-            
-            # 直接检查文件名前缀匹配
-            matching_files = [f for f in files if f.name.startswith(design_image_id)]
-            if matching_files:
-                logger.info(f"找到匹配的文件: {matching_files[0]}")
-                return str(matching_files[0])
-        except Exception as e:
-            logger.error(f"列出目录内容失败: {str(e)}")
+        # 尝试找到对应的图片文件
+        logger.info(f"正在查找设计图: 设计ID={design_id}, 查找目录={upload_dir}")
         
-        # 常规检查
-        for ext in supported_exts:
-            # 尝试使用不同的扩展名构建文件路径
-            file_path = os.path.join(self.upload_dir, f"{design_image_id}{ext}")
-            logger.debug(f"检查文件路径: {file_path}")
-            if os.path.exists(file_path):
-                logger.info(f"找到设计图文件: {file_path}")
+        # 支持的图像扩展名
+        supported_extensions = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
+        
+        # 尝试直接匹配设计ID
+        for ext in supported_extensions:
+            file_path = upload_dir / f"{design_id}{ext}"
+            if file_path.exists():
+                logger.info(f"找到设计图: {file_path}")
                 return file_path
-                
-        # 如果找不到文件，返回默认路径（可能不存在）
-        default_path = os.path.join(self.upload_dir, f"{design_image_id}.png")
-        logger.warning(f"未找到设计图文件: {design_image_id}，使用默认路径: {default_path}。上传目录: {self.upload_dir}")
-        return default_path
+        
+        # 尝试查找包含设计ID的文件
+        for file_path in upload_dir.glob("*"):
+            if file_path.is_file() and any(file_path.name.endswith(ext) for ext in supported_extensions):
+                # 检查文件名是否包含设计ID
+                if design_id in file_path.stem:
+                    logger.info(f"找到匹配的设计图: {file_path}")
+                    return file_path
+        
+        # 尝试找到最近上传的图片文件（倒序排列，最新的在前面）
+        image_files = [f for f in upload_dir.glob("*") 
+                      if f.is_file() and any(f.name.endswith(ext) for ext in supported_extensions)]
+        
+        if image_files:
+            # 按修改时间排序，最新的在前面
+            sorted_files = sorted(image_files, key=lambda x: x.stat().st_mtime, reverse=True)
+            newest_file = sorted_files[0]
+            logger.warning(f"未找到与设计ID匹配的图片，使用最新上传的图片: {newest_file}")
+            return newest_file
+        
+        logger.error(f"未找到任何设计图，设计ID: {design_id}")
+        return None
     
     def _prune_cache_if_needed(self, max_entries: int = 100):
         """如果缓存大小超过限制，清理最旧的缓存条目
@@ -242,30 +281,47 @@ class DesignImageProcessor:
             # 2. 保存图片文件
             # 使用原始文件扩展名
             ext = os.path.splitext(file_name)[1].lower()
+            if not ext or ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']:
+                ext = '.png'  # 默认使用png格式
+                
             unique_filename = f"{image_id}{ext}"
             file_path = os.path.join(self.upload_dir, unique_filename)
             
             # 确保上传目录存在
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            upload_dir = Path(self.upload_dir)
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"确保上传目录存在: {upload_dir}")
+            
+            # Windows路径兼容性处理
+            file_path = str(Path(file_path))
             
             # 保存文件
             with open(file_path, "wb") as f:
                 f.write(file_content)
             logger.info(f"设计图已保存到: {file_path}")
             
-            # 3. 获取图片尺寸
-            img = None
+            # 验证图片文件是否可以正常打开
             try:
+                from PIL import Image
                 img = Image.open(io.BytesIO(file_content))
                 logger.info(f"图片尺寸: {img.size}, 格式: {img.format}")
+                
+                # 保存为PNG格式确保兼容性
+                normalized_path = os.path.join(self.upload_dir, f"{image_id}_normalized.png")
+                normalized_path = str(Path(normalized_path))
+                img.save(normalized_path)
+                logger.info(f"图片已标准化保存为PNG格式: {normalized_path}")
+                
+                # 使用标准化的路径
+                file_path = normalized_path
             except Exception as e:
-                logger.error(f"获取图片信息失败: {str(e)}")
+                logger.warning(f"图片验证或标准化失败，将使用原始文件: {str(e)}")
             
-            # 4. 计算图像哈希，用于缓存查找
+            # 3. 计算图像哈希，用于缓存查找
             image_hash = self._compute_image_hash(file_content)
             logger.info(f"图像哈希值: {image_hash}")
             
-            # 5. 检查缓存中是否有分析结果
+            # 4. 检查缓存中是否有分析结果
             analysis_text = None
             cache_hit = False
             
@@ -278,76 +334,73 @@ class DesignImageProcessor:
                     logger.info(f"使用缓存的分析结果: {image_hash}")
                     cache_hit = True
             
-            # 6. 如果缓存中没有，则调用视觉模型分析
+            # 5. 如果缓存中没有，则调用视觉模型分析
             if not analysis_text:
                 try:
                     # 准备图片数据
-                    img_format = ext.lstrip('.') or 'jpeg'
+                    img_format = ext.lstrip('.') or 'png'
                     
                     # 准备API调用
                     logger.info(f"开始调用vision model进行图片分析: {file_name}")
-                    try:
-                        response = self.vision_model.chat.completions.create(
-                            model=settings.VISION_MODEL,
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "你是一个专业的UI/UX设计分析专家，擅长分析设计图并提供详细的技术描述。"
-                                        "你的任务是提供详细的设计图分析，包括布局结构、UI组件、样式细节、配色方案和交互设计。"
-                                        "分析要全面、具体、结构化，使开发人员能够根据你的分析准确地实现设计。"
-                                    )
-                                },
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": (
-                                                f"请分析这张设计图，并提供以下内容：\n"
-                                                f"1. 页面整体布局和结构\n"
-                                                f"2. UI组件和样式（按钮、输入框、列表等）\n"
-                                                f"3. 色彩主题和排版\n"
-                                                f"4. 交互设计和可能的动效\n"
-                                                f"5. 特殊效果和处理\n\n"
-                                                f"请尽可能详细地分析，包括具体的色值、字体大小、间距等。"
-                                                f"如果涉及技术栈 {tech_stack or '(未指定)'} 的特性，请一并指出。"
-                                            )
-                                        },
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {
-                                                "url": f"data:image/{img_format};base64,{base64.b64encode(file_content).decode('utf-8')}"
-                                            }
+                    
+                    # 减少分析延迟的简化分析
+                    response = self.vision_model.chat.completions.create(
+                        model=settings.VISION_MODEL,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "你是一个高效的UI/UX设计分析专家，需要快速提供设计图的要点分析。"
+                                    "专注于最重要的UI元素、布局结构和设计模式，不需要详细描述每个细节。"
+                                    "分析应当简洁、准确，并突出对开发人员最有用的信息。"
+                                )
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            f"请简洁分析这张设计图，重点关注：\n"
+                                            f"1. 主要布局结构\n"
+                                            f"2. 关键UI组件\n"
+                                            f"3. 核心色彩主题\n"
+                                            f"4. 主要交互元素\n\n"
+                                            f"请提供精简的分析，不超过300字。"
+                                            f"如果涉及技术栈 {tech_stack or '(未指定)'} 的特性，简要提及。"
+                                        )
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/{img_format};base64,{base64.b64encode(file_content).decode('utf-8')}"
                                         }
-                                    ]
-                                }
-                            ],
-                            max_tokens=settings.VISION_MODEL_CONFIG["max_tokens"],
-                            temperature=settings.VISION_MODEL_CONFIG["temperature"]
-                        )
-                        logger.info(f"Vision model ({settings.VISION_MODEL}) 调用成功: {file_name}")
-                    except Exception as e:
-                        logger.error(f"Vision model ({settings.VISION_MODEL}) 调用失败: {str(e)}", exc_info=True)
-                        raise
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=1000,  # 减少token数量加快响应
+                        temperature=0.3  # 使用较低温度获得更确定的结果
+                    )
+                    logger.info(f"Vision model ({settings.VISION_MODEL}) 调用成功: {file_name}")
                     
                     # 提取分析文本
                     analysis_text = response.choices[0].message.content
                     
                     if not analysis_text:
                         logger.error(f"分析结果为空: {file_name}")
-                        raise ValueError("分析结果为空")
+                        analysis_text = f"设计图文件名: {file_name}\n技术栈: {tech_stack}\n上传时间: {datetime.now().isoformat()}\n注意：自动分析返回结果为空，请检查图片是否有效。"
                     elif len(analysis_text.strip()) < 100:
                         logger.warning(f"分析结果过短 ({len(analysis_text.strip())}字符): {file_name}")
-                        raise ValueError("分析结果过短")
+                        analysis_text += f"\n\n附加信息: 文件名: {file_name}, 技术栈: {tech_stack}, 上传时间: {datetime.now().isoformat()}"
                     
                     logger.info(f"成功获取分析结果 ({len(analysis_text.strip())}字符): {file_name}")
                         
                 except Exception as e:
                     logger.error(f"图片分析失败: {str(e)}")
-                    analysis_text = f"设计图文件名: {file_name}\n技术栈: {tech_stack}\n上传时间: {datetime.now().isoformat()}"
+                    analysis_text = f"设计图文件名: {file_name}\n技术栈: {tech_stack}\n上传时间: {datetime.now().isoformat()}\n分析失败原因: {str(e)}"
             
-            # 7. 保存分析结果到缓存
+            # 6. 保存分析结果到缓存
             if not cache_hit and analysis_text:
                 DesignImageProcessor._analysis_cache[image_hash] = {
                     "analysis_text": analysis_text,
@@ -358,67 +411,67 @@ class DesignImageProcessor:
                 self._save_analysis_cache()
                 logger.info(f"已将分析结果添加到缓存: {image_hash}")
             
-            # 8. 将分析结果添加到向量存储
+            # 7. 将分析结果添加到向量存储
             vector_store_success = True
             if self.vector_store:
                 try:
                     metadata = {
                         "id": image_id,
                         "file_name": file_name,
-                        "file_path": file_path,
-                        "image_hash": image_hash,
                         "tech_stack": tech_stack,
-                        "type": "design_image",
-                        "created_at": datetime.now().isoformat()
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "design_analysis"
                     }
                     
-                    if img:
-                        metadata["width"] = img.size[0]
-                        metadata["height"] = img.size[1]
-                        metadata["format"] = img.format
-                    
                     # 添加到向量存储
-                    doc_id = await self.vector_store.add_content(
+                    doc_ids = await self.vector_store.add_content(
                         content=analysis_text,
-                        content_type="design_analysis",
+                        content_type="designs",
                         metadata=metadata
                     )
                     
-                    if doc_id:
-                        logger.info(f"已将设计图分析添加到向量存储: {image_id}")
-                    else:
-                        logger.warning(f"向量存储未返回文档ID，设计图分析可能未被保存: {image_id}")
+                    if not doc_ids:
+                        logger.warning(f"向量存储添加分析结果失败: {image_id}")
                         vector_store_success = False
+                    else:
+                        logger.info(f"已将分析结果添加到向量存储: {image_id}")
                 except Exception as e:
-                    logger.error(f"添加到向量存储失败: {str(e)}")
-                    if settings.DEBUG:
-                        logger.error("详细错误信息:", exc_info=True)
+                    logger.error(f"向量存储添加分析结果失败: {str(e)}")
                     vector_store_success = False
-                    # 不抛出异常，继续处理
             
-            # 9. 构建结果
+            # 8. 构建返回结果
             result = {
                 "id": image_id,
                 "file_name": file_name,
                 "file_path": file_path,
                 "file_size": len(file_content),
-                "analysis": analysis_text,
                 "image_hash": image_hash,
-                "cache_hit": cache_hit,
+                "analysis_text": analysis_text,
+                "tech_stack": tech_stack,
+                "timestamp": datetime.now().isoformat(),
                 "vector_store_success": vector_store_success,
-                "processing_time": 0  # 可以在需要时添加处理时间计算
+                "cache_hit": cache_hit
             }
             
-            # 添加图片信息（如果有）
-            if img:
-                result["image_dimensions"] = img.size
-                result["image_format"] = img.format
+            # 9. 自动清理缓存，避免内存占用过大
+            self._prune_cache_if_needed(DesignImageProcessor._max_cache_size)
             
+            logger.info(f"设计图处理完成: {image_id}")
             return result
             
         except Exception as e:
-            logger.error(f"处理设计图失败: {str(e)}")
-            raise
+            logger.error(f"处理设计图失败: {str(e)}", exc_info=True)
+            return {
+                "id": str(uuid.uuid4()),
+                "file_name": file_name,
+                "file_path": "",
+                "file_size": len(file_content) if file_content else 0,
+                "error": str(e),
+                "tech_stack": tech_stack,
+                "timestamp": datetime.now().isoformat(),
+                "vector_store_success": False,
+                "cache_hit": False
+            }
     
     async def analyze_design(self, image_path: str) -> Dict[str, Any]:
         """分析设计图
@@ -790,225 +843,328 @@ class DesignImageProcessor:
             logger.error(f"搜索相似设计图失败: {str(e)}")
             return []
 
-    async def analyze_design_image(self, image_path: str, tech_stack: str) -> Dict[str, Any]:
+    async def analyze_design_image(self, image_path_or_base64: str, tech_stack: str) -> Dict[str, Any]:
         """分析设计图
-        
+
         Args:
-            image_path: 设计图路径
+            image_path_or_base64: 设计图路径或base64数据
             tech_stack: 技术栈
-            
+
         Returns:
             Dict[str, Any]: 分析结果
         """
+        import tempfile
+        import os
+        import base64
+        import hashlib
+        from pathlib import Path
+        
+        start_time = time.time()
+        logger.info(f"开始分析设计图: tech_stack={tech_stack}")
+        
+        # 准备分析图像
+        temp_file = None
+        local_image_path = None
+        original_image_data = None
+        image_hash = None
+        
         try:
-            # 检查文件是否存在
-            if not os.path.exists(image_path):
-                logger.error(f"设计图文件不存在: {image_path}")
-                return {
-                    "status": "error",
-                    "message": f"设计图文件不存在: {image_path}",
-                    "elements": [],
-                    "colors": [],
-                    "fonts": [],
-                    "layout": {},
-                    "summary": "无法分析设计图，文件不存在"
-                }
+            # 检查缓存 - 先计算哈希
+            is_base64_data = isinstance(image_path_or_base64, str) and image_path_or_base64.startswith('data:image')
+            if is_base64_data:
+                try:
+                    # 保存原始base64数据
+                    original_image_data = image_path_or_base64
+                    
+                    # 提取base64数据部分计算哈希值
+                    header, b64_data = image_path_or_base64.split(',', 1)
+                    image_hash = hashlib.sha256(b64_data.encode('utf-8')).hexdigest()
+                except Exception as e:
+                    logger.warning(f"计算base64哈希值出错: {str(e)}")
+            else:
+                # 如果是文件路径，计算文件哈希值
+                if os.path.exists(image_path_or_base64):
+                    try:
+                        with open(image_path_or_base64, 'rb') as f:
+                            file_data = f.read()
+                        image_hash = hashlib.sha256(file_data).hexdigest()
+                        
+                        # 读取并转换为base64
+                        encoded = base64.b64encode(file_data).decode('utf-8')
+                        image_type = os.path.splitext(image_path_or_base64)[1][1:].lower()
+                        if image_type not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                            image_type = 'png'
+                        original_image_data = f"data:image/{image_type};base64,{encoded}"
+                    except Exception as e:
+                        logger.warning(f"计算文件哈希值或转换base64时出错: {str(e)}")
             
-            # 读取图片
-            try:
-                with open(image_path, "rb") as f:
-                    image_data = f.read()
-                logger.info(f"成功读取设计图文件: {image_path}, 大小: {len(image_data)} 字节")
-            except Exception as e:
-                logger.error(f"读取设计图文件失败: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"读取设计图文件失败: {str(e)}",
-                    "summary": "无法读取设计图文件"
-                }
+            # 如果有哈希值和原始图像数据，尝试从缓存获取
+            if image_hash and original_image_data:
+                cache_key = f"{image_hash}_{tech_stack}"
+                if cache_key in self._analysis_cache:
+                    logger.info(f"从缓存获取设计图分析结果: {cache_key}")
+                    cached_result = self._analysis_cache[cache_key]
+                    
+                    # 确保缓存结果中包含原始图像数据
+                    if not cached_result.get("image_base64"):
+                        cached_result["image_base64"] = original_image_data
+                        logger.info("已将原始图像数据添加到缓存结果中")
+                    
+                    return cached_result
             
-            # 尝试验证图片格式
-            try:
-                from PIL import Image
-                import io
-                img = Image.open(io.BytesIO(image_data))
-                logger.info(f"图片格式: {img.format}, 尺寸: {img.size}, 模式: {img.mode}")
-            except Exception as e:
-                logger.error(f"验证图片格式失败: {str(e)}")
-                # 继续处理，不中断流程
-            
-            # 获取文件名和格式
-            filename = os.path.basename(image_path)
-            img_format = os.path.splitext(filename)[1][1:].lower()
-            if not img_format:
-                img_format = "png"  # 默认格式
-            
-            # 构建分析提示
-            analysis_prompt = f"""
-            请分析这个UI设计图，并提供以下信息：
-            
-            1. 布局结构：描述整体布局、主要区域和组件排列
-            2. UI组件：识别所有UI组件（按钮、输入框、列表等）
-            3. 颜色方案：提取主要颜色及其用途
-            4. 字体和排版：描述字体大小、样式和文本排版
-            5. 交互元素：识别可交互的元素及其可能的行为
-            6. 技术实现建议：基于{tech_stack}技术栈的实现建议
-            
-            请提供详细、准确、可实现的分析结果。
-            """
-            
-            # 使用视觉模型分析图片
-            try:
-                # 检查视觉模型是否已初始化
-                if not self.vision_model:
-                    logger.error(f"视觉模型未初始化")
+            # 没有缓存，处理图像
+            if is_base64_data:
+                try:
+                    # 提取base64数据部分
+                    header, b64_data = image_path_or_base64.split(',', 1)
+                    
+                    # 创建临时文件
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                    temp_file.close()
+                    
+                    # 解码并写入临时文件
+                    image_data = base64.b64decode(b64_data)
+                    with open(temp_file.name, 'wb') as f:
+                        f.write(image_data)
+                    
+                    local_image_path = temp_file.name
+                    logger.info(f"已将base64图像数据保存为临时文件: {local_image_path}")
+                except Exception as e:
+                    logger.error(f"处理base64数据时出错: {str(e)}")
                     return {
                         "status": "error",
-                        "message": "视觉模型未初始化",
-                        "summary": "系统错误：视觉模型未初始化，无法分析设计图"
+                        "error": "base64处理失败",
+                        "error_message": str(e),
+                        "image_base64": original_image_data  # 返回原始base64数据
                     }
+            else:
+                # 使用提供的文件路径
+                if os.path.exists(image_path_or_base64):
+                    local_image_path = image_path_or_base64
+                    logger.info(f"使用文件路径: {local_image_path}")
+                else:
+                    logger.error(f"文件不存在: {image_path_or_base64}")
+                    return {
+                        "status": "error",
+                        "error": "文件不存在",
+                        "error_message": f"指定的文件路径不存在: {image_path_or_base64}"
+                    }
+            
+            # 分析图像
+            try:
+                # 构建分析提示
+                analysis_prompt = self._build_analysis_prompt(tech_stack)
                 
-                # 记录使用的视觉模型信息
-                vision_model = settings.VISION_MODEL
-                vision_temp = settings.VISION_MODEL_CONFIG["temperature"]
-                vision_max_tokens = settings.VISION_MODEL_CONFIG["max_tokens"]
-                logger.info(f"使用视觉模型 {vision_model} 分析设计图: {filename}")
+                # 读取图像数据
+                with open(local_image_path, 'rb') as f:
+                    image_data = f.read()
                 
-                # 创建图像的base64编码
+                # 使用视觉模型分析图像
+                vision_analysis = await self._analyze_with_vision_model(image_data, analysis_prompt)
+                
+                # 处理分析结果
                 try:
-                    image_base64 = base64.b64encode(image_data).decode('utf-8')
-                    logger.info(f"成功创建图像的base64编码: {len(image_base64)} 字符")
+                    # 格式化为结构化数据
+                    sections = self._split_analysis_sections(vision_analysis)
+                    
+                    # 构建基本结果
+                    result = {
+                        "status": "success",
+                        "raw_analysis": vision_analysis,
+                        "summary": sections.get("overview", "未能提取设计概述"),
+                        "elements": [],
+                        "colors": [],
+                        "layout": {},
+                        "fonts": [],
+                        "image_base64": original_image_data,  # 添加base64数据
+                        "processing_time": time.time() - start_time
+                    }
+                    
+                    # 处理UI组件部分
+                    ui_components = self._parse_components_from_text(vision_analysis, tech_stack)
+                    if ui_components:
+                        result["elements"] = ui_components
+                    
+                    # 处理颜色方案
+                    try:
+                        color_scheme = await self._extract_color_scheme(local_image_path)
+                        if color_scheme and "colors" in color_scheme:
+                            result["colors"] = color_scheme["colors"]
+                    except Exception as e:
+                        logger.warning(f"提取颜色方案失败: {str(e)}")
+                    
+                    # 如果颜色为空，尝试从文本中提取
+                    if not result["colors"]:
+                        colors = []
+                        color_section = sections.get("colors", "")
+                        hex_pattern = r'#[0-9A-Fa-f]{6}'
+                        hex_matches = re.findall(hex_pattern, color_section)
+                        for i, hex_code in enumerate(hex_matches[:5]):
+                            colors.append({
+                                "hex": hex_code,
+                                "name": f"颜色{i+1}"
+                            })
+                        result["colors"] = colors
+                    
+                    # 处理布局信息
+                    layout = {"structure": "未知布局", "alignment": "未知对齐", "spacing": "未知间距"}
+                    layout_section = sections.get("layout", "")
+                    if layout_section:
+                        layout_lines = layout_section.split('\n')
+                        for line in layout_lines:
+                            if "结构" in line:
+                                layout["structure"] = line.split("结构", 1)[1].strip().strip(':：').strip()
+                            elif "对齐" in line:
+                                layout["alignment"] = line.split("对齐", 1)[1].strip().strip(':：').strip()
+                            elif "间距" in line:
+                                layout["spacing"] = line.split("间距", 1)[1].strip().strip(':：').strip()
+                    result["layout"] = layout
+                    
+                    # 处理字体信息
+                    fonts = []
+                    fonts_section = sections.get("typography", "")
+                    if fonts_section:
+                        font_lines = fonts_section.split('\n')
+                        for line in font_lines:
+                            if line.startswith('-') or line.startswith('*'):
+                                font_info = line[1:].strip()
+                                font_parts = font_info.split(',')
+                                if len(font_parts) >= 1:
+                                    font_name = font_parts[0].strip()
+                                    font_style = "Regular"
+                                    font_size = "未知"
+                                    
+                                    if len(font_parts) >= 2:
+                                        for part in font_parts[1:]:
+                                            if "px" in part or "pt" in part or "sp" in part:
+                                                font_size = part.strip()
+                                            elif any(style in part.lower() for style in ["bold", "regular", "medium", "light"]):
+                                                font_style = part.strip()
+                                    
+                                    fonts.append({
+                                        "name": font_name,
+                                        "style": font_style,
+                                        "size": font_size
+                                    })
+                    result["fonts"] = fonts
+                    
+                    # 保存到缓存
+                    if image_hash:
+                        cache_key = f"{image_hash}_{tech_stack}"
+                        self._analysis_cache[cache_key] = result
+                        
+                        # 异步保存缓存
+                        try:
+                            self._save_analysis_cache()
+                            logger.info(f"已保存分析结果到缓存: {cache_key}")
+                        except Exception as e:
+                            logger.warning(f"保存分析结果到缓存时出错: {str(e)}")
+                    
+                    # 清理临时文件
+                    if temp_file and os.path.exists(temp_file.name):
+                        os.unlink(temp_file.name)
+                        logger.info(f"已删除临时文件: {temp_file.name}")
+                    
+                    logger.info(f"设计图分析完成，耗时: {result['processing_time']:.2f}秒")
+                    return result
+                    
                 except Exception as e:
-                    logger.error(f"创建图像的base64编码失败: {str(e)}")
-                    raise
-                
-                # API调用
-                response = self.vision_model.chat.completions.create(
-                    model=vision_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是一个专业的UI设计分析专家，擅长分析移动应用界面设计。"
-                                "请提供详细、准确、可实现的分析结果，包含所有必要的技术细节。"
-                                "确保所有尺寸、颜色、位置关系等信息都是具体和精确的。"
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": analysis_prompt
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/{img_format};base64,{image_base64}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    max_tokens=vision_max_tokens,
-                    temperature=vision_temp
-                )
-                logger.info(f"视觉模型 {vision_model} 分析完成: {filename}, 使用温度: {vision_temp}, 最大tokens: {vision_max_tokens}")
-                
-                # 提取分析结果
-                analysis_result = response.choices[0].message.content
-                
-                # 构建结果
-                result = {
-                    "status": "success",
-                    "filename": filename,
-                    "tech_stack": tech_stack,
-                    "analysis": analysis_result,
-                    "timestamp": datetime.now().isoformat(),
-                    "image_path": image_path,
-                    "elements": [],
-                    "colors": [],
-                    "fonts": [],
-                    "layout": {},
-                    "summary": "分析成功"
-                }
-                
-                # 尝试解析分析文本，提取结构化信息
-                try:
-                    self._extract_structured_info(result, analysis_result)
-                except Exception as e:
-                    logger.error(f"提取结构化信息失败: {str(e)}")
-                    # 不影响主流程
-                
-                return result
-                
+                    logger.error(f"解析分析结果时出错: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+                    # 返回带有base64数据的基本结果
+                    return {
+                        "status": "error",
+                        "error": "解析失败",
+                        "error_message": str(e),
+                        "image_base64": original_image_data,
+                        "raw_analysis": vision_analysis,
+                        "elements": [],
+                        "colors": [],
+                        "layout": {},
+                        "fonts": [],
+                        "summary": "分析结果解析失败，无法提供详细信息。"
+                    }
             except Exception as e:
-                logger.error(f"视觉模型 {settings.VISION_MODEL} 分析失败: {str(e)}", exc_info=True)
+                logger.error(f"分析图像时出错: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # 返回带有base64数据的错误结果
                 return {
                     "status": "error",
-                    "message": f"视觉模型分析失败: {str(e)}",
-                    "summary": "视觉模型分析失败，无法完成设计图分析"
+                    "error": "分析失败",
+                    "error_message": str(e),
+                    "image_base64": original_image_data,
+                    "elements": [],
+                    "colors": [],
+                    "layout": {},
+                    "fonts": [],
+                    "summary": "图像分析过程中出错，无法提供分析结果。"
                 }
-                
         except Exception as e:
-            logger.error(f"分析设计图失败: {str(e)}", exc_info=True)
+            logger.error(f"处理设计图时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # 返回基本的错误结果
             return {
                 "status": "error",
-                "message": f"分析设计图失败: {str(e)}",
-                "summary": "分析过程中发生错误"
+                "error": "未知错误",
+                "error_message": str(e),
+                "image_base64": original_image_data,
+                "elements": [],
+                "colors": [],
+                "layout": {},
+                "fonts": [],
+                "summary": "处理设计图时出现未知错误，无法进行分析。"
             }
+        finally:
+            # 确保清理临时文件
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                    logger.info(f"已删除临时文件: {temp_file.name}")
+                except Exception as e:
+                    logger.warning(f"清理临时文件时出错: {str(e)}")
     
-    def _extract_structured_info(self, result: Dict[str, Any], analysis_text: str) -> None:
-        """从分析文本中提取结构化信息
+    def _extract_basic_image_info(self, image_path: str) -> Dict[str, Any]:
+        """提取图像的基本信息
         
         Args:
-            result: 要更新的结果字典
-            analysis_text: 分析文本
+            image_path: 图像路径
+            
+        Returns:
+            Dict[str, Any]: 基本图像信息
         """
-        # 提取摘要
-        summary_match = re.search(r'整体(描述|分析|设计|总览|概述)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d|\Z)', analysis_text, re.DOTALL)
-        if summary_match:
-            result["summary"] = summary_match.group(2).strip()
-        
-        # 提取UI元素
-        elements = []
-        elements_section = re.search(r'(UI组件|界面元素|主要组件)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d+\.|\Z)', analysis_text, re.DOTALL)
-        if elements_section:
-            elements_text = elements_section.group(2)
-            element_matches = re.findall(r'[-*]?\s*(\w+)[:：]\s*(.+?)(?=\n[-*]|\Z)', elements_text, re.DOTALL)
-            for name, desc in element_matches:
-                elements.append({
-                    "name": name.strip(),
-                    "type": "UI组件",
-                    "description": desc.strip()
-                })
-        result["elements"] = elements
-        
-        # 提取颜色
-        colors = []
-        colors_section = re.search(r'(颜色方案|配色方案|色彩)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d+\.|\Z)', analysis_text, re.DOTALL)
-        if colors_section:
-            colors_text = colors_section.group(2)
-            color_matches = re.findall(r'[-*]?\s*([^:：\n]+)[:：]\s*(.+?)(?=\n[-*]|\Z)', colors_text, re.DOTALL)
-            for name, desc in color_matches:
-                # 尝试提取颜色代码
-                hex_match = re.search(r'(#[0-9A-Fa-f]{6})', desc)
-                hex_code = hex_match.group(1) if hex_match else "#000000"
-                colors.append({
-                    "name": name.strip(),
-                    "hex": hex_code,
-                    "description": desc.strip()
-                })
-        result["colors"] = colors
-        
-        # 提取布局信息
-        layout = {}
-        layout_section = re.search(r'(布局结构|布局|结构)[:：]?\s*(.+?)(?=\n\n|\n#|\n\d+\.|\Z)', analysis_text, re.DOTALL)
-        if layout_section:
-            layout["structure"] = layout_section.group(2).strip()
-        
-        result["layout"] = layout
-
+        try:
+            from PIL import Image
+            img = Image.open(image_path)
+            return {
+                "width": img.width,
+                "height": img.height,
+                "format": img.format,
+                "mode": img.mode,
+                "aspect_ratio": round(img.width / img.height, 2) if img.height > 0 else 0
+            }
+        except Exception as e:
+            logger.warning(f"提取图像基本信息失败: {str(e)}")
+            return {
+                "width": 0,
+                "height": 0,
+                "format": "未知",
+                "mode": "未知",
+                "aspect_ratio": 0
+            }
+    
+    async def _save_analysis_cache_async(self):
+        """异步保存分析缓存"""
+        try:
+            with open(self._analysis_cache_file, "w", encoding="utf-8") as f:
+                json.dump(self._analysis_cache, f, ensure_ascii=False, indent=2)
+            logger.info(f"已异步保存分析缓存: {len(self._analysis_cache)}条记录")
+        except Exception as e:
+            logger.error(f"异步保存分析缓存失败: {str(e)}")
+            logger.error(traceback.format_exc())
+    
     async def _analyze_image_for_tech_stack(
         self, 
         image_path: str, 
@@ -1584,3 +1740,48 @@ class DesignImageProcessor:
         }
         
         return enhanced_analysis 
+
+    async def analyze_image(self, image_id: str, image_path: str) -> Dict[str, Any]:
+        """分析设计图像（兼容性方法，是analyze_design_image的包装器）
+        
+        Args:
+            image_id: 图像ID
+            image_path: 图像路径
+            
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        logger.info(f"调用analyze_image方法: image_id={image_id}, image_path={image_path}")
+        try:
+            # 确定技术栈
+            tech_stack = None
+            
+            # 尝试从图像ID提取技术栈信息
+            if "_" in image_id and not image_id.startswith("data:image/"):
+                parts = image_id.split("_")
+                if len(parts) > 1 and parts[0] in settings.DESIGN_PROMPT_CONFIG.get("supported_tech_stacks", []):
+                    tech_stack = parts[0]
+                    logger.info(f"从图像ID提取到技术栈: {tech_stack}")
+            
+            if not tech_stack:
+                # 使用默认技术栈
+                tech_stack = "Android"
+                logger.info(f"使用默认技术栈: {tech_stack}")
+            
+            # 调用实际的分析方法
+            result = await self.analyze_design_image(image_path, tech_stack)
+            return result
+        except Exception as e:
+            logger.error(f"analyze_image失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # 返回基本分析结果
+            return {
+                "status": "error",
+                "error": str(e),
+                "elements": [],
+                "colors": [],
+                "fonts": [],
+                "layout": {},
+                "summary": f"图像分析失败: {str(e)}"
+            } 
